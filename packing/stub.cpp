@@ -18,8 +18,8 @@ struct FileEntry {
     bool isDir = false;
     bool compressed = false;
     std::string name;
-    size_t size = 0;      // uncompressed size
-    size_t compSize = 0;  // bytes actually stored in the payload
+    size_t size = 0;
+    size_t compSize = 0; 
 };
 
 std::wstring selfPath()
