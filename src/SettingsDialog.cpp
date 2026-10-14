@@ -7,9 +7,12 @@
 #include <QFontComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
@@ -30,6 +33,132 @@ QStringList SettingsDialog::availableAnimations()
 QStringList SettingsDialog::availableUpcomingModes()
 {
     return {QStringLiteral("Hidden"), QStringLiteral("Next word"), QStringLiteral("All words")};
+}
+
+QStringList SettingsDialog::availableCaptionStyles()
+{
+    return {QStringLiteral("Classic"), QStringLiteral("Instagram Story"),
+            QStringLiteral("Big & Small"), QStringLiteral("Spotlight"),
+            QStringLiteral("Karaoke Glow")};
+}
+
+StyleSkin SettingsDialog::styleSkin(const QString &style, int opacityPercent)
+{
+    const int pct = qBound(0, opacityPercent, 100);
+    const int a = pct * 255 / 100;
+    const auto col = [](int r, int g, int b, int alpha) { return QColor(r, g, b, alpha); };
+
+    StyleSkin skin;
+    skin.textColor = QStringLiteral("#ffffff");
+    skin.accentColor = QStringLiteral("#bfe2ff");
+
+    if (style == QLatin1String("Floating Text")) {
+        // No card at all - the text floats straight over the desktop.
+        skin.drawsCard = false;
+        skin.textColor = QStringLiteral("#ffffff");
+        skin.accentColor = QStringLiteral("#ffffff");
+        skin.padX = 18;
+        skin.padY = 12;
+    } else if (style == QLatin1String("Instagram")) {
+        // The signature sunset gradient with a soft corner; opacity tints it.
+        QLinearGradient g(0, 0, 1, 1);
+        g.setColorAt(0.0, col(254, 218, 117, a));
+        g.setColorAt(0.55, col(214, 41, 118, a));
+        g.setColorAt(1.0, col(150, 47, 191, a));
+        skin.fill = QBrush(g);
+        skin.radius = 22;
+        skin.textColor = QStringLiteral("#ffffff");
+        skin.accentColor = QStringLiteral("#ffffff");
+        skin.padX = 30;
+        skin.padY = 22;
+    } else if (style == QLatin1String("Karaoke")) {
+        // Deep aubergine stage with a hot-pink glow for the sung word.
+        skin.fill = QBrush(col(23, 19, 52, a));
+        skin.borderColor = col(255, 255, 255, 28);
+        skin.borderWidth = 1;
+        skin.radius = 18;
+        skin.textColor = QStringLiteral("#f8f6ff");
+        skin.accentColor = QStringLiteral("#ff4f9a");
+        skin.padX = 30;
+        skin.padY = 22;
+    } else if (style == QLatin1String("Minimal Bar")) {
+        // Translucent frosted pill; the accent is a clean mint underline-style.
+        skin.fill = QBrush(col(255, 255, 255, qBound(5, pct * 22 / 100, 65)));
+        skin.borderColor = col(255, 255, 255, 90);
+        skin.borderWidth = 1;
+        skin.radius = 999;   // large radius clamps to a capsule
+        skin.textColor = QStringLiteral("#f2f4fc");
+        skin.accentColor = QStringLiteral("#16c79a");
+        skin.padX = 32;
+        skin.padY = 14;
+    } else if (style == QLatin1String("Neon")) {
+        // Near-black neon board with an electric violet frame and mint glow.
+        skin.fill = QBrush(col(11, 11, 23, a));
+        skin.borderColor = col(109, 91, 255, 160);
+        skin.borderWidth = 1;
+        skin.radius = 16;
+        skin.textColor = QStringLiteral("#c9c4ff");
+        skin.accentColor = QStringLiteral("#7dffc4");
+        skin.padX = 30;
+        skin.padY = 22;
+    } else if (style == QLatin1String("Album Card")) {
+        // A vinyl-album look: near-opaque ivory card with dark ink text and a
+        // violet accent for the current word.
+        skin.fill = QBrush(col(250, 248, 255, qBound(120, pct * 255 / 100, 245)));
+        skin.borderColor = col(109, 91, 255, 110);
+        skin.borderWidth = 1;
+        skin.radius = 20;
+        skin.textColor = QStringLiteral("#1b1430");
+        skin.accentColor = QStringLiteral("#6d5bff");
+        skin.padX = 30;
+        skin.padY = 22;
+    } else {
+        // Glass Card (default): light frost, translucent white card.
+        skin.fill = QBrush(col(255, 255, 255, qBound(5, pct * 38 / 100, 130)));
+        skin.borderColor = col(255, 255, 255, 110);
+        skin.borderWidth = 1;
+        skin.radius = 22;
+        skin.textColor = QStringLiteral("#ffffff");
+        skin.accentColor = QStringLiteral("#bfe2ff");
+        skin.padX = 30;
+        skin.padY = 22;
+    }
+    return skin;
+}
+
+QString StyleSkin::surfaceCss() const
+{
+    if (!drawsCard)
+        return QStringLiteral("background: transparent; border: none;");
+
+    const auto rgba = [](const QColor &c) {
+        return QStringLiteral("rgba(%1,%2,%3,%4)")
+            .arg(c.red()).arg(c.green()).arg(c.blue())
+            .arg(QString::number(c.alphaF(), 'f', 3));
+    };
+
+    QString css;
+    if (fill.style() == Qt::LinearGradientPattern && fill.gradient()) {
+        const auto *g = static_cast<const QLinearGradient *>(fill.gradient());
+        css = QStringLiteral("background: qlineargradient(x1:%1, y1:%2, x2:%3, y2:%4")
+                  .arg(g->start().x(), 1, 'f', 2)
+                  .arg(g->start().y(), 1, 'f', 2)
+                  .arg(g->finalStop().x(), 1, 'f', 2)
+                  .arg(g->finalStop().y(), 1, 'f', 2);
+        for (const auto &stop : g->stops())
+            css += QStringLiteral(", stop:%1 %2").arg(stop.first, 1, 'f', 2).arg(rgba(stop.second));
+        css += QLatin1Char(')');
+    } else {
+        css = QStringLiteral("background-color: %1").arg(rgba(fill.color()));
+    }
+    css += QLatin1Char(';');
+
+    if (borderWidth > 0 && borderColor.alpha() > 0)
+        css += QStringLiteral(" border: %1px solid %2;").arg(borderWidth).arg(rgba(borderColor));
+    else
+        css += QStringLiteral(" border: none;");
+    css += QStringLiteral(" border-radius: %1px;").arg(radius);
+    return css;
 }
 
 SettingsDialog::SettingsDialog(const LyricStyleOptions &options, QWidget *parent)
@@ -95,6 +224,17 @@ SettingsDialog::SettingsDialog(const LyricStyleOptions &options, QWidget *parent
     upcomingBox->setCurrentText(options.upcomingWords);
     if (upcomingBox->currentIndex() < 0) upcomingBox->setCurrentIndex(2);
     upcomingBox->setEnabled(options.wordByWord);
+    captionBox = new QComboBox(this);
+    captionBox->addItems(availableCaptionStyles());
+    captionBox->setCurrentText(options.captionStyle);
+    if (captionBox->currentIndex() < 0) captionBox->setCurrentIndex(0);
+    captionBox->setToolTip(QStringLiteral(
+        "How the words are typeset over any display style.\n"
+        "Classic: the whole line with the sung word highlighted.\n"
+        "Instagram Story: bold uppercase reveal with a highlight behind each word.\n"
+        "Big & Small: the active word is large, the rest small.\n"
+        "Spotlight: only the word being sung, big and centered.\n"
+        "Karaoke Glow: the whole line with the active word lit up in the accent colour."));
     emphasizeBox = new QCheckBox(QStringLiteral("Highlight the current word"), this);
     emphasizeBox->setChecked(options.emphasizeWord);
     emphasizeBox->setEnabled(options.wordByWord);
@@ -139,6 +279,7 @@ SettingsDialog::SettingsDialog(const LyricStyleOptions &options, QWidget *parent
     appearance->addRow(QString(), songInfoBox);
 
     auto *captions = new QFormLayout;
+    captions->addRow(QStringLiteral("Caption style"), captionBox);
     captions->addRow(QString(), wordByWordBox);
     captions->addRow(QStringLiteral("Upcoming words"), upcomingBox);
     captions->addRow(QString(), emphasizeBox);
@@ -183,14 +324,36 @@ SettingsDialog::SettingsDialog(const LyricStyleOptions &options, QWidget *parent
     auto *previewLabel = new QLabel(QStringLiteral("Live preview"), this);
     previewLabel->setStyleSheet(QStringLiteral("font-weight:600;"));
 
+    // Everything scrolls inside one area so the dialog never runs off a short
+    // screen; the OK/Cancel row stays pinned at the bottom.
+    auto *content = new QWidget(this);
+    auto *contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    contentLayout->setSpacing(12);
+    contentLayout->addWidget(appearanceGroup);
+    contentLayout->addWidget(captionsGroup);
+    contentLayout->addWidget(autoGroup);
+    contentLayout->addWidget(previewLabel);
+    contentLayout->addWidget(preview);
+    contentLayout->addStretch(1);
+
+    auto *scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setWidget(content);
+
     auto *layout = new QVBoxLayout(this);
     layout->setSpacing(12);
-    layout->addWidget(appearanceGroup);
-    layout->addWidget(captionsGroup);
-    layout->addWidget(autoGroup);
-    layout->addWidget(previewLabel);
-    layout->addWidget(preview);
+    layout->addWidget(scroll, 1);
     layout->addWidget(buttons);
+
+    // Never grow taller than the screen: cap the height and let the content scroll.
+    if (const QScreen *screen = QGuiApplication::primaryScreen()) {
+        const int maxHeight = screen->availableGeometry().height() * 82 / 100;
+        setMaximumHeight(maxHeight);
+        resize(540, qMin(maxHeight, 720));
+    }
 
     // ---- Wiring -----------------------------------------------------------
     connect(styleBox, &QComboBox::currentTextChanged, this, &SettingsDialog::updatePreview);
@@ -209,9 +372,17 @@ SettingsDialog::SettingsDialog(const LyricStyleOptions &options, QWidget *parent
     connect(colorCheck, &QCheckBox::toggled, this, &SettingsDialog::updatePreview);
     connect(colorButton, &QPushButton::clicked, this, &SettingsDialog::pickColor);
     connect(songInfoBox, &QCheckBox::toggled, this, &SettingsDialog::updatePreview);
+    connect(captionBox, &QComboBox::currentTextChanged, this, [this](const QString &) {
+        const bool classic = (captionBox->currentText() == QLatin1String("Classic"));
+        wordByWordBox->setEnabled(classic);
+        upcomingBox->setEnabled(classic && wordByWordBox->isChecked());
+        emphasizeBox->setEnabled(classic && wordByWordBox->isChecked());
+        updatePreview();
+    });
     connect(wordByWordBox, &QCheckBox::toggled, this, [this](bool on) {
-        upcomingBox->setEnabled(on);
-        emphasizeBox->setEnabled(on);
+        const bool classic = (captionBox->currentText() == QLatin1String("Classic"));
+        upcomingBox->setEnabled(on && classic);
+        emphasizeBox->setEnabled(on && classic);
         updatePreview();
     });
 
@@ -238,29 +409,16 @@ void SettingsDialog::updatePreview()
                                                                       : QStringLiteral("#fff")));
     colorButton->setEnabled(colorCheck->isChecked());
 
-    const QString color = colorCheck->isChecked() ? chosenColor.name() : QStringLiteral("#ffffff");
-    const int alpha = qBound(10, opacitySlider->value(), 100) * 255 / 100;
-
     const QString style = styleBox->currentText();
-    QString background = QStringLiteral("rgba(35,38,52,%1)").arg(alpha);
-    if (style == QLatin1String("Floating Text"))
-        background = QStringLiteral("transparent");
-    else if (style == QLatin1String("Instagram"))
-        background = QStringLiteral("rgba(18,18,24,%1)").arg(alpha);
-    else if (style == QLatin1String("Karaoke"))
-        background = QStringLiteral("rgba(12,12,18,%1)").arg(alpha);
-    else if (style == QLatin1String("Neon"))
-        background = QStringLiteral("rgba(8,10,22,%1)").arg(alpha);
-    else if (style == QLatin1String("Minimal Bar"))
-        background = QStringLiteral("rgba(20,20,20,%1)").arg(alpha);
-    else if (style == QLatin1String("Album Card"))
-        background = QStringLiteral("rgba(35,25,48,%1)").arg(alpha);
+    const StyleSkin skin = styleSkin(style, opacitySlider->value());
+    const QString color = colorCheck->isChecked() ? chosenColor.name() : skin.textColor;
 
     preview->setStyleSheet(
-        QStringLiteral("QLabel { background:%1; color:%2; border:1px solid rgba(255,255,255,60);"
-                       " border-radius:14px; padding:14px; font-family:'%3'; font-size:%4px;"
-                       " font-weight:%5; }")
-            .arg(background, color, fontBox->currentFont().family())
+        QStringLiteral("QLabel { %1 color:%2; padding:%3px %4px;"
+                       " font-family:'%5'; font-size:%6px;"
+                       " font-weight:%7; }")
+            .arg(skin.surfaceCss(), color, QString::number(skin.padY),
+                 QString::number(skin.padX), fontBox->currentFont().family())
             .arg(sizeBox->value())
             .arg(boldBox->isChecked() ? 700 : 400));
 }
@@ -280,6 +438,7 @@ void SettingsDialog::resetDefaults()
     songInfoBox->setChecked(d.showSongInfo);
     wordByWordBox->setChecked(d.wordByWord);
     upcomingBox->setCurrentText(d.upcomingWords);
+    captionBox->setCurrentText(d.captionStyle);
     emphasizeBox->setChecked(d.emphasizeWord);
     animationBox->setCurrentText(d.animation);
     spacingBox->setValue(d.lineSpacing);
@@ -305,6 +464,7 @@ LyricStyleOptions SettingsDialog::options() const
     result.pollIntervalMs = pollBox->value() * 1000;
     result.wordByWord = wordByWordBox->isChecked();
     result.upcomingWords = upcomingBox->currentText();
+    result.captionStyle = captionBox->currentText();
     result.emphasizeWord = emphasizeBox->isChecked();
     result.animation = animationBox->currentText();
     result.lineSpacing = spacingBox->value();

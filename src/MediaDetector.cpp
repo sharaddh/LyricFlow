@@ -354,7 +354,7 @@ NowPlaying detectNowPlaying()
 MediaDetector::MediaDetector(QObject *parent) : QObject(parent)
 {
     m_timer = new QTimer(this);
-    m_timer->setInterval(1500);
+    m_timer->setInterval(800);
     connect(m_timer, &QTimer::timeout, this, &MediaDetector::poll);
 }
 
@@ -378,7 +378,7 @@ bool MediaDetector::isRunning() const
 
 void MediaDetector::setInterval(int intervalMs)
 {
-    m_timer->setInterval(qBound(400, intervalMs, 15000));
+    m_timer->setInterval(qBound(250, intervalMs, 8000));
 }
 
 void MediaDetector::pollNow()

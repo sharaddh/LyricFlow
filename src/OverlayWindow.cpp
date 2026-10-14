@@ -8,10 +8,11 @@
 #include <QDir>
 #include <QFont>
 #include <QIcon>
-#include <QLabel>
+#include <QGuiApplication>
 #include <QLinearGradient>
 #include <QMenu>
 #include <QPainter>
+#include <QPaintEvent>
 #include <QPixmap>
 #include <QStringList>
 #include <QMouseEvent>
@@ -19,43 +20,45 @@
 #include <QScreen>
 #include <QSettings>
 #include <QShortcut>
-#include <QVBoxLayout>
 #include <QAction>
 #include <QKeyEvent>
 #include <QTimer>
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QDateTime>
+#include <QtMath>
 #include <QTextDocument>
+#include <QResizeEvent>
 #include <QSystemTrayIcon>
-#include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
 #include <QVariantAnimation>
 #include <QEasingCurve>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace {
 
 QIcon makeAppIcon()
 {
-    QPixmap pixmap(64, 64);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-
-    QLinearGradient gradient(0, 0, 64, 64);
-    gradient.setColorAt(0.0, QColor(124, 92, 255));
-    gradient.setColorAt(1.0, QColor(77, 238, 234));
-    painter.setBrush(gradient);
-    painter.setPen(Qt::NoPen);
-    painter.drawRoundedRect(pixmap.rect().adjusted(4, 4, -4, -4), 16, 16);
-
-    painter.setPen(Qt::white);
-    QFont font(QStringLiteral("Segoe UI"), 30, QFont::Bold);
-    painter.setFont(font);
-    painter.drawText(pixmap.rect(), Qt::AlignCenter, QStringLiteral("\u266A"));
-    painter.end();
-    return QIcon(pixmap);
+    return QIcon(QStringLiteral(":/app.ico"));
 }
+
+#ifdef Q_OS_WIN
+
+// Keep the overlay out of the taskbar and Alt+Tab list (it lives in the system
+// tray instead) by turning it into a tool window.
+void hideFromTaskbar(HWND hwnd)
+{
+    if (!hwnd) return;
+    LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    ex |= WS_EX_TOOLWINDOW;
+    ex &= ~static_cast<LONG_PTR>(WS_EX_APPWINDOW);
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+}
+
+#endif
 
 bool windowsRunEntryPresent()
 {
@@ -73,35 +76,32 @@ bool windowsRunEntryPresent()
 OverlayWindow::OverlayWindow(QWidget *parent) : QWidget(parent)
 {
     setWindowTitle(QStringLiteral("Capson"));
+    setObjectName(QStringLiteral("overlayRoot"));
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    // Translucency must be requested BEFORE the native window is created;
+    // otherwise the window is created opaque and the painted card never shows.
     setAttribute(Qt::WA_TranslucentBackground);
-    setAttribute(Qt::WA_StyledBackground, true);   // let the style sheet paint the card
+    setAttribute(Qt::WA_NoSystemBackground, true);
+#ifdef Q_OS_WIN
+    hideFromTaskbar(reinterpret_cast<HWND>(winId()));
+#endif
     setMinimumSize(260, 90);
     resize(660, 170);
     setFocusPolicy(Qt::StrongFocus);
     setWindowIcon(makeAppIcon());
 
-    lyricsLabel = new QLabel(this);
-    lyricsLabel->setAlignment(Qt::AlignCenter);
-    lyricsLabel->setWordWrap(true);
-    lyricsLabel->setTextInteractionFlags(Qt::NoTextInteraction);
-    QSizePolicy labelPolicy = lyricsLabel->sizePolicy();
-    labelPolicy.setHeightForWidth(true);
-    lyricsLabel->setSizePolicy(labelPolicy);
-
-    labelOpacity = new QGraphicsOpacityEffect(lyricsLabel);
-    labelOpacity->setOpacity(1.0);
-    lyricsLabel->setGraphicsEffect(labelOpacity);
-
-    auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(24, 20, 24, 20);
-    layout->addWidget(lyricsLabel);
+    // The lyrics are laid out and painted through this document. It is measured
+    // (for the window height) and painted (in paintEvent) from the same source,
+    // so wrapping and the reserved height always agree.
+    textDoc = new QTextDocument(this);
+    textDoc->setDocumentMargin(0);
+    textDoc->setTextWidth(qMax(160, width() - 2 * padX));
 
     syncTimer = new QTimer(this);
     syncTimer->setInterval(80);
     connect(syncTimer, &QTimer::timeout, this, &OverlayWindow::updateSyncedLine);
 
-    fadeAnimation = new QPropertyAnimation(labelOpacity, "opacity", this);
+    fadeAnimation = new QPropertyAnimation(this, "textOpacity", this);
     fadeAnimation->setDuration(180);
     fadeAnimation->setEasingCurve(QEasingCurve::OutCubic);
 
@@ -177,8 +177,8 @@ OverlayWindow::OverlayWindow(QWidget *parent) : QWidget(parent)
         saveSettings();
     });
 
-    mediaDetector->start(pollIntervalMs);
-    mediaSession->start(250);
+    mediaDetector->start(qBound(250, pollIntervalMs, 5000));
+    mediaSession->start(150);
 
     // Make sure the last position is remembered even when quitting from the tray.
     connect(qApp, &QApplication::aboutToQuit, this, &OverlayWindow::saveSettings);
@@ -190,18 +190,20 @@ void OverlayWindow::updateText()
 
     if (showingTip) {
         const int tipSize = qMax(12, fontSize * 55 / 100);
-        lyricsLabel->setText(
-            QStringLiteral("<div style='font-size:%1px; opacity:0.9;'>"
+        setDocumentHtml(
+            QStringLiteral("<div style='text-align:center; color:%1; font-size:%2px; opacity:0.9;'>"
                            "Right-click or double-click the overlay for options.<br>"
                            "Drag to move it · scroll to resize the text.</div>")
+                .arg(resolvedTextColor)
                 .arg(tipSize));
-        fitToContent();
         return;
     }
 
     // Nothing is playing: keep the overlay completely blank.
     if (!songActive) {
-        lyricsLabel->clear();
+        textDoc->setHtml(QString());
+        renderedHtml.clear();
+        lastRenderedHtml.clear();
         fitToContent();
         return;
     }
@@ -214,53 +216,90 @@ void OverlayWindow::updateText()
     QString text;
     if (showSongInfo) {
         const int infoSize = qMax(11, fontSize * 45 / 100);
-        text = QStringLiteral("<div style='font-size:%1px; letter-spacing:1px; opacity:0.85;'>%2 — %3</div>"
+        text = QStringLiteral("<div style='text-align:center; color:%1;'>"
+                              "<div style='font-size:%2px; letter-spacing:1px; opacity:0.85;'>%3 — %4</div>"
                               "<div style='height:8px'></div>"
-                              "<div style='line-height:150%'>%4</div>")
+                              "<div style='line-height:150%'>%5</div></div>")
+                   .arg(resolvedTextColor)
                    .arg(infoSize)
                    .arg(currentSong.toHtmlEscaped(), currentArtist.toHtmlEscaped(),
                         currentLyrics.toHtmlEscaped());
     } else {
-        text = QStringLiteral("<div style='line-height:150%'>%1</div>")
-                   .arg(currentLyrics.toHtmlEscaped());
+        text = QStringLiteral("<div style='text-align:center; color:%1; line-height:150%'>%2</div>")
+                   .arg(resolvedTextColor, currentLyrics.toHtmlEscaped());
     }
-    lyricsLabel->setText(text);
-    fitToContent();
+    setDocumentHtml(text);
 }
 
 void OverlayWindow::applyStyle()
 {
-    const QString customColor = textColor.name();
-    const int alpha = qBound(0, opacityPercent, 100) * 255 / 100;
+    const StyleSkin skin =
+        SettingsDialog::styleSkin(currentStyle, opacityPercent);
 
-    QString windowCss;
-    QString defaultColor = QStringLiteral("white");
-    if (currentStyle == QLatin1String("Floating Text")) {
-        windowCss = QStringLiteral("background: transparent; border: none;");
-    } else if (currentStyle == QLatin1String("Instagram")) {
-        windowCss = QStringLiteral("background-color: rgba(18,18,24,%1); border: 1px solid rgba(255,255,255,70); border-radius: 26px;").arg(alpha);
-    } else if (currentStyle == QLatin1String("Karaoke")) {
-        windowCss = QStringLiteral("background-color: rgba(12,12,18,%1); border: 2px solid #7c5cff; border-radius: 16px;").arg(alpha);
-        defaultColor = QStringLiteral("#f8f6ff");
-    } else if (currentStyle == QLatin1String("Neon")) {
-        windowCss = QStringLiteral("background-color: rgba(8,10,22,%1); border: 1px solid #4deeea; border-radius: 18px;").arg(alpha);
-        defaultColor = QStringLiteral("#8ffff9");
-    } else if (currentStyle == QLatin1String("Minimal Bar")) {
-        windowCss = QStringLiteral("background-color: rgba(20,20,20,%1); border-radius: 10px;").arg(alpha);
-    } else if (currentStyle == QLatin1String("Album Card")) {
-        windowCss = QStringLiteral("background-color: rgba(35,25,48,%1); border: 1px solid rgba(220,180,255,100); border-radius: 22px;").arg(alpha);
-        defaultColor = QStringLiteral("#fff7ff");
-    } else {
-        windowCss = QStringLiteral("background-color: rgba(35,38,52,%1); border: 1px solid rgba(255,255,255,75); border-radius: 22px;").arg(alpha);
+    // Custom colour overrides only the text; the accent is the skin's highlight
+    // colour, so the current word keeps the look of the chosen skin.
+    const QString color = useCustomColor ? textColor.name() : skin.textColor;
+    resolvedTextColor = color;
+    resolvedAccentColor = useCustomColor ? color : skin.accentColor;
+    padX = skin.padX;
+    padY = skin.padY;
+
+    skinFill = skin.fill;
+    skinBorderColor = skin.borderColor;
+    skinBorderWidth = skin.borderWidth;
+    skinRadius = skin.radius;
+    drawsCard = skin.drawsCard;
+
+    applyTextFont();
+    update();
+    fitToContent();
+}
+
+// Paints the rounded, translucent card behind the lyrics. This is done by hand
+// because a style-sheet background is not rendered on a per-pixel-alpha window.
+void OverlayWindow::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event);
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    if (drawsCard) {
+        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        if (skinBorderWidth > 0 && skinBorderColor.alpha() > 0)
+            painter.setPen(QPen(skinBorderColor, skinBorderWidth));
+        else
+            painter.setPen(Qt::NoPen);
+
+        if (skinFill.style() == Qt::LinearGradientPattern && skinFill.gradient()) {
+            const auto *src = static_cast<const QLinearGradient *>(skinFill.gradient());
+            QLinearGradient g(rect().topLeft(), rect().bottomRight());
+            for (const auto &stop : src->stops())
+                g.setColorAt(stop.first, stop.second);
+            painter.setBrush(g);
+        } else {
+            painter.setBrush(skinFill);
+        }
+
+        painter.drawRoundedRect(r, skinRadius, skinRadius);
     }
 
-    const QString color = useCustomColor ? customColor : defaultColor;
-    resolvedTextColor = color;
-    const QString labelCss = QStringLiteral("QLabel { color: %1; background: transparent; }").arg(color);
-    setStyleSheet(QStringLiteral("OverlayWindow {") + windowCss + QStringLiteral("}"));
-    lyricsLabel->setStyleSheet(labelCss);
-    applyLabelFont();
-    fitToContent();
+    // Draw the lyrics. The document already wrapped itself to exactly this width,
+    // so its height matches the height fitToContent() reserved for it.
+    if (textDoc && !textDoc->isEmpty()) {
+        const int contentWidth = qMax(160, width() - 2 * padX);
+        textDoc->setTextWidth(contentWidth);
+        const qreal docH = textDoc->size().height();
+        const qreal areaTop = padY;
+        const qreal areaH = qMax(qreal(0), height() - 2.0 * padY);
+        const qreal y = areaTop + qMax(qreal(0), (areaH - docH) / 2.0);
+
+        painter.save();
+        painter.setOpacity(m_textOpacity);
+        painter.translate(padX, y);
+        textDoc->drawContents(&painter, QRectF(0, 0, contentWidth, docH));
+        painter.restore();
+    }
 }
 
 int OverlayWindow::effectiveFontSize() const
@@ -268,7 +307,7 @@ int OverlayWindow::effectiveFontSize() const
     return qMax(6, qRound(fontSize * m_captionScale));
 }
 
-void OverlayWindow::applyLabelFont()
+void OverlayWindow::applyTextFont()
 {
     QFont f(fontFamily, effectiveFontSize());
     f.setBold(fontBold);
@@ -276,27 +315,33 @@ void OverlayWindow::applyLabelFont()
     // glyphs so Hindi lyrics and their vowel marks render instead of vanishing.
     f.setFamilies({fontFamily, QStringLiteral("Nirmala UI"), QStringLiteral("Segoe UI"),
                    QStringLiteral("Segoe UI Symbol"), QStringLiteral("Segoe UI Emoji")});
-    lyricsLabel->setFont(f);
+    textDoc->setDefaultFont(f);
     if (!syncedLines.isEmpty() && syncTimer->isActive())
         renderSynced();
+}
+
+void OverlayWindow::setTextOpacity(qreal opacity)
+{
+    m_textOpacity = opacity;
+    update();
 }
 
 void OverlayWindow::setCaptionScale(qreal scale)
 {
     if (qFuzzyCompare(m_captionScale, scale)) return;
     m_captionScale = scale;
-    applyLabelFont();
+    applyTextFont();
 }
 
 void OverlayWindow::animateCaption()
 {
-    if (animationType == QLatin1String("None") || !labelOpacity || !fadeAnimation) {
-        if (labelOpacity) labelOpacity->setOpacity(1.0);
+    if (animationType == QLatin1String("None") || !fadeAnimation) {
+        setTextOpacity(1.0);
         return;
     }
 
     fadeAnimation->stop();
-    labelOpacity->setOpacity(0.2);
+    setTextOpacity(0.2);
     fadeAnimation->setStartValue(0.2);
     fadeAnimation->setEndValue(1.0);
     fadeAnimation->start();
@@ -332,6 +377,7 @@ LyricStyleOptions OverlayWindow::currentOptions() const
     options.pollIntervalMs = pollIntervalMs;
     options.wordByWord = wordByWord;
     options.upcomingWords = upcomingWords;
+    options.captionStyle = captionStyle;
     options.emphasizeWord = emphasizeWord;
     options.animation = animationType;
     options.lineSpacing = lineSpacing;
@@ -355,6 +401,7 @@ void OverlayWindow::applyOptions(const LyricStyleOptions &options)
     wordByWord = options.wordByWord;
     upcomingWords = options.upcomingWords;
     emphasizeWord = options.emphasizeWord;
+    captionStyle = options.captionStyle;
     animationType = options.animation;
     lineSpacing = options.lineSpacing;
     showTips = options.showTips;
@@ -416,19 +463,24 @@ void OverlayWindow::loadLyrics(const LyricsResult &result)
     }
     currentSong = result.trackName.isEmpty() ? QStringLiteral("Unknown song") : result.trackName;
     currentArtist = result.artistName.isEmpty() ? QStringLiteral("Unknown artist") : result.artistName;
+    currentTrackId = makeTrackId(currentSong, currentArtist);
     plainLyrics = result.plainLyrics;
     syncedLines.clear();
     parseSyncedLyrics(result.syncedLyrics);
 
     if (!syncedLines.isEmpty()) {
         elapsedOffset = QDateTime::currentMSecsSinceEpoch();
-        haveSyncBase = false;
+        haveSyncBase = true;
+        syncBaseMs = 0;
+        syncBaseStampMs = QDateTime::currentMSecsSinceEpoch();
+        positionTrustworthy = false;
         hasLastReport = false;
-        lastLineIndex = -1;
+        lastLineIndex = -10;
+        lastWordIndex = -10;
         m_captionScale = 1.0;
-        if (labelOpacity) labelOpacity->setOpacity(1.0);
-        syncTimer->start();
-        currentLyrics = syncedLines.first().text;
+        setTextOpacity(1.0);
+        if (!syncTimer->isActive()) syncTimer->start();
+        currentLyrics = syncedLines.isEmpty() ? QString() : syncedLines.first().text;
     } else {
         syncTimer->stop();
         currentLyrics = plainLyrics.isEmpty()
@@ -445,14 +497,43 @@ void OverlayWindow::loadLyrics(const LyricsResult &result)
 // keeping the user's chosen width. Without this the last line could be cut off.
 void OverlayWindow::fitToContent()
 {
-    const int contentWidth = qMax(160, width() - 48);
-    int labelHeight = lyricsLabel->heightForWidth(contentWidth);
-    if (labelHeight <= 0)
-        labelHeight = lyricsLabel->sizeHint().height();
-    // 40px for the top/bottom margins plus 6px so tall matras are never clipped.
-    const int target = qMax(minimumHeight(), labelHeight + 46);
+    // Wrap the document at exactly the width it will be painted at (window minus
+    // padding) so the measured height and the painted height can never disagree.
+    const int contentWidth = qMax(160, width() - 2 * padX);
+    const int docHeight = measureContentHeight(contentWidth);
+    const int target = qMax(minimumHeight(), docHeight + 2 * padY + 6);
     if (target != height())
         resize(width(), target);
+    update();
+}
+
+int OverlayWindow::measureContentHeight(int width) const
+{
+    if (!textDoc)
+        return 0;
+    textDoc->setTextWidth(qMax(160, width));
+    return qCeil(textDoc->size().height());
+}
+
+// Sets the rich text shown by the overlay and re-fits the window height to it.
+void OverlayWindow::setDocumentHtml(const QString &html)
+{
+    renderedHtml = html;
+    lastRenderedHtml = html;
+    if (textDoc) {
+        textDoc->setHtml(html);
+        textDoc->setTextWidth(qMax(160, width() - 2 * padX));
+    }
+    fitToContent();
+}
+
+void OverlayWindow::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    if (textDoc) {
+        textDoc->setTextWidth(qMax(160, width() - 2 * padX));
+        update();
+    }
 }
 
 void OverlayWindow::showStartupTip()
@@ -582,10 +663,21 @@ qint64 OverlayWindow::currentPlaybackMs() const
 
 void OverlayWindow::onMediaState(const MediaState &state)
 {
-    if (!state.valid) {
+    if (!state.valid || state.title.isEmpty()) {
         mediaSessionActive = false;
+        sessionTitle.clear();
+        sessionArtist.clear();
+        sessionSourceApp.clear();
+        sessionPlaying = false;
         return;
     }
+
+    // Remember the OS-reported song so we can fall back to it when window-title
+    // detection cannot see the playing app (e.g. a background browser tab).
+    sessionTitle = state.title;
+    sessionArtist = state.artist;
+    sessionSourceApp = state.sourceApp;
+    sessionPlaying = state.isPlaying();
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (state.positionMs > 0 || state.durationMs > 0)
@@ -595,21 +687,22 @@ void OverlayWindow::onMediaState(const MediaState &state)
         syncBaseMs = state.positionMs;
         syncBaseStampMs = now;
         haveSyncBase = true;
-    } else if (!hasLastReport || state.positionMs != lastReportedMs) {
+    } else if (!hasLastReport || state.positionMs != lastReportedMs || qAbs(state.positionMs - lastReportedMs) > 1000) {
         // A fresh report: trust it. Big jumps are seeks; small ones are the
         // normal tick. Either way we re-anchor so the overlay tracks exactly.
         syncBaseMs = state.positionMs;
         syncBaseStampMs = now;
     }
-    // else: the player kept reporting the same position (e.g. paused or a
-    // coarse timeline). Keep our own clock running instead of snapping back.
+    // else: the player kept reporting the same position - keep our own clock running.
 
     hasLastReport = true;
     lastReportedMs = state.positionMs;
     mediaPlaying = state.isPlaying();
     mediaSessionActive = true;
 
-    if (!syncedLines.isEmpty()) renderSynced();
+    if (!syncedLines.isEmpty()) {
+        renderSynced();
+    }
 }
 
 void OverlayWindow::renderSynced()
@@ -618,10 +711,12 @@ void OverlayWindow::renderSynced()
 
     const qint64 pos = currentPlaybackMs();
     int lineIndex = 0;
+    if (syncedLines.isEmpty()) return;
     for (int i = 0; i < syncedLines.size(); ++i) {
         if (syncedLines.at(i).milliseconds <= pos) lineIndex = i;
         else break;
     }
+    if (lineIndex >= syncedLines.size()) lineIndex = syncedLines.size() - 1;
     const LyricLine &line = syncedLines.at(lineIndex);
 
     int wordIndex = -1;
@@ -633,75 +728,158 @@ void OverlayWindow::renderSynced()
     QColor base(resolvedTextColor);
     if (!base.isValid()) base = QColor(Qt::white);
     base.setAlpha(255);
-    QColor dim = base;
-    dim.setAlpha(95);
-    const QString activeCss = base.name();
-    const QString dimCss = QStringLiteral("rgba(%1,%2,%3,%4)")
-                               .arg(dim.red())
-                               .arg(dim.green())
-                               .arg(dim.blue())
-                               .arg(QString::number(dim.alphaF(), 'f', 3));
-    const QString pillCss = QStringLiteral("rgba(%1,%2,%3,0.30)")
-                                .arg(base.red())
-                                .arg(base.green())
-                                .arg(base.blue());
+    QColor accent(resolvedAccentColor);
+    if (!accent.isValid()) accent = base;
+    accent.setAlpha(255);
+    const auto css = [](const QColor &c, int alpha) {
+        return QStringLiteral("rgba(%1,%2,%3,%4)")
+            .arg(c.red()).arg(c.green()).arg(c.blue())
+            .arg(QString::number(alpha / 255.0, 'f', 3));
+    };
+    const QString curCss = accent.name();
+    const QString doneCss = css(base, 150);
+    const QString upcomingCss = css(base, 80);
+    const QString pillCss = css(accent, 80);
 
     const int gap = qMax(0, effectiveFontSize() * lineSpacing / 100);
 
     const bool hideUpcoming = (upcomingWords == QLatin1String("Hidden"));
     const bool nextOnly = (upcomingWords == QLatin1String("Next word"));
 
+    const int fs = effectiveFontSize();
+    const bool classic = captionStyle.isEmpty() || captionStyle == QLatin1String("Classic");
+    const bool story = captionStyle == QLatin1String("Instagram Story");
+    const bool bigSmall = captionStyle == QLatin1String("Big & Small");
+    const bool spotlight = captionStyle == QLatin1String("Spotlight");
+    const bool karaoke = captionStyle == QLatin1String("Karaoke Glow");
+    const QString weight = fontBold ? QStringLiteral("bold") : QStringLiteral("normal");
+
+    // Base style for the lyric block. Presets that mix font sizes reserve the
+    // tallest possible line via line-height so the card never jumps word to word.
+    QString blockStyle =
+        QStringLiteral("text-align:center; color:%1; line-height:150%").arg(resolvedTextColor);
+
     QString lineHtml;
-    if (wordByWord && !line.words.isEmpty()) {
+    if (spotlight) {
+        // Only the word being sung, big and centered, changing quickly.
+        int w = wordIndex;
+        if (w < 0 && !line.words.isEmpty()) w = 0;
+        const QString word = (!line.words.isEmpty() && w >= 0 && w < line.words.size())
+                                 ? line.words.at(w).text
+                                 : line.text;
+        blockStyle = QStringLiteral("text-align:center; color:%1; line-height:150%; font-size:%2px")
+                         .arg(resolvedTextColor)
+                         .arg(qRound(fs * 1.9));
+        if (!word.isEmpty())
+            lineHtml = QStringLiteral("<span style=\"color:%1; font-weight:%2;\">%3</span>")
+                           .arg(curCss, weight, word.toHtmlEscaped());
+    } else if (!classic && !line.words.isEmpty()) {
+        // Instagram Story / Big & Small / Karaoke Glow: the whole line stays laid
+        // out (unseen words are transparent) so wrapping and height stay stable.
         QStringList pieces;
         for (int w = 0; w < line.words.size(); ++w) {
             const bool sung = (w <= wordIndex);
-            if (!sung) {
-                if (hideUpcoming) continue;
-                if (nextOnly && w != wordIndex + 1) continue;
+            const bool current = (w == wordIndex);
+            QString text = line.words.at(w).text.toHtmlEscaped();
+            if (story) text = text.toUpper();
+
+            const bool reveal = story ? sung : true;   // Story reveals as it is sung.
+            if (!reveal) {
+                pieces << QStringLiteral("<span style=\"color:transparent;\">%1</span>").arg(text);
+                continue;
             }
+
+            QString style;
+            if (story) {
+                style = current
+                            ? QStringLiteral("color:%1; background-color:%2; font-weight:bold;")
+                                  .arg(curCss, pillCss)
+                            : QStringLiteral("color:%1; font-weight:bold;").arg(css(base, 150));
+            } else if (bigSmall) {
+                style = current
+                            ? QStringLiteral("color:%1; font-weight:%2;").arg(curCss, weight)
+                            : QStringLiteral("color:%1; font-size:%2px;")
+                                  .arg(sung ? doneCss : upcomingCss)
+                                  .arg(qRound(fs * 0.7));
+            } else { // Karaoke Glow
+                style = current
+                            ? QStringLiteral("color:%1; font-size:%2px; font-weight:%3;")
+                                  .arg(curCss).arg(qRound(fs * 1.15)).arg(weight)
+                            : QStringLiteral("color:%1;").arg(sung ? doneCss : upcomingCss);
+            }
+            pieces << QStringLiteral("<span style=\"%1\">%2</span>").arg(style, text);
+        }
+        lineHtml = pieces.join(QLatin1Char(' '));
+
+        if (bigSmall)
+            blockStyle = QStringLiteral("text-align:center; color:%1; line-height:150%; font-size:%2px")
+                             .arg(resolvedTextColor)
+                             .arg(qRound(fs * 1.7));
+        else if (karaoke)
+            blockStyle = QStringLiteral("text-align:center; color:%1; line-height:175%")
+                             .arg(resolvedTextColor);
+        else // Instagram Story
+            blockStyle = QStringLiteral("text-align:center; color:%1; line-height:165%")
+                             .arg(resolvedTextColor);
+    } else if (wordByWord && !line.words.isEmpty()) {
+        QStringList pieces;
+        for (int w = 0; w < line.words.size(); ++w) {
+            const bool sung = (w <= wordIndex);
+            const bool reveal = sung || (!hideUpcoming && (!nextOnly || w == wordIndex + 1));
             const QString text = line.words.at(w).text.toHtmlEscaped();
-            if (sung && emphasizeWord && w == wordIndex) {
+            if (!reveal) {
+                // Not shown yet, but keep its space (transparent) so the line
+                // measures and wraps exactly like the full line. Otherwise the
+                // wrapped height grows as words appear and the bottom of the
+                // overlay clips the text.
+                pieces << QStringLiteral("<span style=\"color:transparent;\">%1</span>").arg(text);
+                continue;
+            }
+            if (emphasizeWord && w == wordIndex) {
                 pieces << QStringLiteral("<span style=\"color:%1; background-color:%2;\">"
                                          "\u2009%3\u2009</span>")
-                              .arg(activeCss, pillCss, text);
+                              .arg(curCss, pillCss, text);
+            } else if (w == wordIndex) {
+                pieces << QStringLiteral("<span style=\"color:%1;\">%2</span>")
+                              .arg(curCss, text);
             } else {
                 pieces << QStringLiteral("<span style=\"color:%1;\">%2</span>")
-                              .arg(sung ? activeCss : dimCss, text);
+                              .arg(sung ? doneCss : upcomingCss, text);
             }
         }
         lineHtml = pieces.join(QLatin1Char(' '));
     } else if (!line.text.isEmpty()) {
         lineHtml = QStringLiteral("<span style=\"color:%1;\">%2</span>")
-                       .arg(activeCss, line.text.toHtmlEscaped());
+                       .arg(curCss, line.text.toHtmlEscaped());
     }
 
     // The generous line-height reserves room for tall Indic vowel marks (matras)
     // so the first line is not clipped at the top of the overlay.
     QString html;
     if (showSongInfo) {
-        const int infoSize = qMax(11, effectiveFontSize() * 45 / 100);
-        html = QStringLiteral("<div style='font-size:%1px; letter-spacing:1px; opacity:0.85;'>"
-                              "%2 — %3</div><div style='height:%4px'></div>"
-                              "<div style='line-height:150%'>%5</div>")
+        const int infoSize = qMax(11, fs * 45 / 100);
+        html = QStringLiteral("<div style='text-align:center; color:%1; font-size:%2px; "
+                              "letter-spacing:1px; opacity:0.85;'>"
+                              "%3 — %4</div><div style='height:%5px'></div>"
+                              "<div style='%6'>%7</div>")
+                   .arg(resolvedTextColor)
                    .arg(infoSize)
                    .arg(currentSong.toHtmlEscaped(), currentArtist.toHtmlEscaped())
                    .arg(gap)
-                   .arg(lineHtml);
+                   .arg(blockStyle, lineHtml);
     } else {
-        html = QStringLiteral("<div style='line-height:150%'>") + lineHtml
-             + QStringLiteral("</div>");
+        html = QStringLiteral("<div style='%1'>%2</div>").arg(blockStyle, lineHtml);
     }
 
     currentLyrics = line.text;
     const bool lineChanged = (lineIndex != lastLineIndex);
+    const bool wordChanged = (wordIndex != lastWordIndex);
     lastLineIndex = lineIndex;
+    lastWordIndex = wordIndex;
     if (html != lastRenderedHtml) {
-        lastRenderedHtml = html;
-        lyricsLabel->setText(html);
+        setDocumentHtml(html);
     }
-    if (lineChanged) {
-        fitToContent();
+    if (spotlight ? wordChanged : lineChanged) {
         animateCaption();
     }
 }
@@ -739,6 +917,47 @@ void OverlayWindow::handleAutoResults(quint64 token, const QList<LyricsResult> &
     loadLyrics(pickBest(results, mediaDetector->current()));
 }
 
+void OverlayWindow::startSong(const QString &title, const QString &artist,
+                              const QString &sourceApp, const QString &query)
+{
+    if (showingTip) {
+        showingTip = false;
+        if (tipTimer) tipTimer->stop();
+    }
+        const QString tid = makeTrackId(title, artist);
+        if (songActive && tid == currentTrackId && !syncedLines.isEmpty()) {
+            currentLyrics = QStringLiteral("Searching lyrics for \"%1\"...").arg(title);
+            updateText();
+            const quint64 token = ++autoRequestId;
+            autoClient->searchAuto(title, artist, query, token);
+            return;
+        }
+
+    songActive = true;
+    currentTrackId = tid;
+    lastAutoQuery = query;
+    currentSong = title;
+    currentArtist = artist.isEmpty() ? sourceApp : artist;
+    syncedLines.clear();
+    syncTimer->stop();
+    plainLyrics.clear();
+            haveSyncBase = false;
+            positionTrustworthy = false;
+            hasLastReport = false;
+            lastLineIndex = -1;
+            lastWordIndex = -1;
+            m_captionScale = 1.0;
+            setTextOpacity(1.0);
+            currentTrackId.clear();
+            syncedLines.clear();
+            syncTimer->stop();
+            updateText();
+    updateTrayNowPlaying();
+
+    const quint64 token = ++autoRequestId;
+    autoClient->searchAuto(title, artist, query, token);
+}
+
 void OverlayWindow::onNowPlaying(const NowPlaying &np)
 {
     if (!autoDetect) {
@@ -746,56 +965,54 @@ void OverlayWindow::onNowPlaying(const NowPlaying &np)
         return;
     }
 
-    // Playback stopped / nothing detected: wipe the overlay clean.
-    if (!np.valid) {
-        if (songActive || !lastAutoQuery.isEmpty()) {
-            songActive = false;
-            lastAutoQuery.clear();
-            syncedLines.clear();
-            syncTimer->stop();
-            plainLyrics.clear();
-            currentSong.clear();
-            currentArtist.clear();
-            currentLyrics.clear();
-            haveSyncBase = false;
-            positionTrustworthy = false;
-            hasLastReport = false;
-            lastLineIndex = -1;
-            m_captionScale = 1.0;
-            if (labelOpacity) labelOpacity->setOpacity(1.0);
-            updateText();
+    // Prefer MediaSession when playing as it's more reliable and stable
+    if (sessionPlaying && !sessionTitle.isEmpty()) {
+        const QString query = sessionArtist.isEmpty()
+            ? sessionTitle
+            : sessionArtist + QStringLiteral(" ") + sessionTitle;
+        const QString tid = makeTrackId(sessionTitle, sessionArtist);
+        if (tid != currentTrackId || !songActive) {
+            startSong(sessionTitle, sessionArtist, sessionSourceApp, query);
+            return;
         }
         updateTrayNowPlaying();
         return;
     }
 
-    if (np.query == lastAutoQuery) {
-        updateTrayNowPlaying();
+    // Window-title detection
+    if (np.valid) {
+        const QString tid = makeTrackId(np.title, np.artist);
+        if (tid == currentTrackId && songActive) {
+            updateTrayNowPlaying();
+            return;
+        }
+        startSong(np.title, np.artist, np.sourceApp, np.query);
         return;
     }
 
-    if (showingTip) {
-        showingTip = false;
-        if (tipTimer) tipTimer->stop();
+    // Playback stopped / nothing detected: wipe the overlay clean.
+    if (songActive || !lastAutoQuery.isEmpty()) {
+        songActive = false;
+        lastAutoQuery.clear();
+        syncedLines.clear();
+        syncTimer->stop();
+        plainLyrics.clear();
+        currentSong.clear();
+        currentArtist.clear();
+        currentLyrics.clear();
+        haveSyncBase = false;
+        positionTrustworthy = false;
+        hasLastReport = false;
+        lastLineIndex = -1;
+        lastWordIndex = -1;
+        m_captionScale = 1.0;
+        setTextOpacity(1.0);
+        currentTrackId.clear();
+        syncedLines.clear();
+        syncTimer->stop();
+        updateText();
     }
-    songActive = true;
-    lastAutoQuery = np.query;
-    currentSong = np.title;
-    currentArtist = np.artist.isEmpty() ? np.sourceApp : np.artist;
-    syncedLines.clear();
-    syncTimer->stop();
-    haveSyncBase = false;
-    positionTrustworthy = false;
-    hasLastReport = false;
-    lastLineIndex = -1;
-    m_captionScale = 1.0;
-    if (labelOpacity) labelOpacity->setOpacity(1.0);
-    currentLyrics = QStringLiteral("Searching lyrics for \"%1\"…").arg(np.title);
-    updateText();
     updateTrayNowPlaying();
-
-    const quint64 token = ++autoRequestId;
-    autoClient->searchAuto(np.title, np.artist, np.query, token);
 }
 
 void OverlayWindow::setupTray()
@@ -859,6 +1076,16 @@ void OverlayWindow::contextMenuEvent(QContextMenuEvent *event)
 {
     showStyleMenu();
     event->accept();
+}
+
+void OverlayWindow::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+#ifdef Q_OS_WIN
+    // Re-apply in case Qt recreated the native window; keeps it out of the
+    // taskbar and Alt+Tab on every show.
+    hideFromTaskbar(reinterpret_cast<HWND>(winId()));
+#endif
 }
 
 void OverlayWindow::mousePressEvent(QMouseEvent *event)
@@ -928,6 +1155,7 @@ void OverlayWindow::saveSettings()
     settings.setValue(QStringLiteral("pollInterval"), pollIntervalMs);
     settings.setValue(QStringLiteral("wordByWord"), wordByWord);
     settings.setValue(QStringLiteral("upcomingWords"), upcomingWords);
+    settings.setValue(QStringLiteral("captionStyle"), captionStyle);
     settings.setValue(QStringLiteral("emphasizeWord"), emphasizeWord);
     settings.setValue(QStringLiteral("captionAnimation"), animationType);
     settings.setValue(QStringLiteral("lineSpacing"), lineSpacing);
@@ -950,6 +1178,7 @@ void OverlayWindow::loadSettings()
     pollIntervalMs = settings.value(QStringLiteral("pollInterval"), pollIntervalMs).toInt();
     wordByWord = settings.value(QStringLiteral("wordByWord"), wordByWord).toBool();
     upcomingWords = settings.value(QStringLiteral("upcomingWords"), upcomingWords).toString();
+    captionStyle = settings.value(QStringLiteral("captionStyle"), captionStyle).toString();
     emphasizeWord = settings.value(QStringLiteral("emphasizeWord"), emphasizeWord).toBool();
     animationType = settings.value(QStringLiteral("captionAnimation"), animationType).toString();
     lineSpacing = settings.value(QStringLiteral("lineSpacing"), lineSpacing).toInt();
@@ -957,6 +1186,8 @@ void OverlayWindow::loadSettings()
     startWithWindows = settings.value(QStringLiteral("startWithWindows"),
                                       startWithWindows).toBool();
     startWithWindows = windowsRunEntryPresent();
+
+    pollIntervalMs = qBound(250, pollIntervalMs, 5000);
 
     const QByteArray geometry = settings.value(QStringLiteral("overlay/geometry")).toByteArray();
     if (!geometry.isEmpty()) {

@@ -41,7 +41,7 @@ public:
     explicit MediaSession(QObject *parent = nullptr);
     ~MediaSession() override;
 
-    void start(int intervalMs = 250);
+    void start(int intervalMs = 150);
     void stop();
 
     bool available() const { return m_available; }

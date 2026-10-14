@@ -3,19 +3,21 @@
 #include <QPoint>
 #include <QList>
 #include <QColor>
+#include <QBrush>
 #include "LyricsClient.h"
 #include "MediaDetector.h"
 #include "MediaSession.h"
 #include "SettingsDialog.h"
 
-class QLabel;
+class QTextDocument;
 class QMouseEvent;
 class QWheelEvent;
 class QContextMenuEvent;
+class QShowEvent;
+class QResizeEvent;
 class QTimer;
 class QSystemTrayIcon;
 class QAction;
-class QGraphicsOpacityEffect;
 class QPropertyAnimation;
 class QVariantAnimation;
 
@@ -23,13 +25,19 @@ class OverlayWindow final : public QWidget
 {
     Q_OBJECT
     Q_PROPERTY(qreal captionScale READ captionScale WRITE setCaptionScale)
+    Q_PROPERTY(qreal textOpacity READ textOpacity WRITE setTextOpacity)
 public:
     explicit OverlayWindow(QWidget *parent = nullptr);
 
     qreal captionScale() const { return m_captionScale; }
     void setCaptionScale(qreal scale);
 
+    qreal textOpacity() const { return m_textOpacity; }
+    void setTextOpacity(qreal opacity);
+
 protected:
+    void paintEvent(QPaintEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -37,9 +45,14 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 
 private:
-    QLabel *lyricsLabel = nullptr;
+    // Lyrics are rendered with a QTextDocument we control directly: the very same
+    // document is used to measure the wrapped height and to paint it, so the
+    // window can never collapse to a single line and clip the text.
+    QTextDocument *textDoc = nullptr;
+    qreal m_textOpacity = 1.0;
     QPoint dragOffset;
     bool dragging = false;
 
@@ -62,11 +75,12 @@ private:
     bool wordByWord = true;
     QString upcomingWords = QStringLiteral("All words");
     bool emphasizeWord = false;
+    QString captionStyle = QStringLiteral("Classic");
     QString animationType = QStringLiteral("Fade");
     int lineSpacing = 45;
     qreal m_captionScale = 1.0;
     int lastLineIndex = -1;
-    QGraphicsOpacityEffect *labelOpacity = nullptr;
+    int lastWordIndex = -1;
     QPropertyAnimation *fadeAnimation = nullptr;
     QVariantAnimation *scaleAnimation = nullptr;
 
@@ -75,7 +89,20 @@ private:
     qint64 elapsedOffset = 0;
     QTimer *syncTimer = nullptr;
     QString resolvedTextColor = QStringLiteral("white");
+    QString resolvedAccentColor = QStringLiteral("#bfe2ff");
+    int padX = 30;
+    int padY = 22;
+    QString renderedHtml;
     QString lastRenderedHtml;
+
+    // Card appearance painted in paintEvent. A style-sheet background does not
+    // render on a per-pixel-alpha (translucent) top-level window, so the card is
+    // drawn directly with QPainter instead.
+    QBrush skinFill;
+    QColor skinBorderColor = QColor(Qt::transparent);
+    int skinBorderWidth = 0;
+    int skinRadius = 22;
+    bool drawsCard = true;
 
     MediaSession *mediaSession = nullptr;
     bool mediaSessionActive = false;
@@ -86,6 +113,12 @@ private:
     qint64 lastReportedMs = 0;
     qint64 syncBaseMs = 0;
     qint64 syncBaseStampMs = 0;
+    QString sessionTitle;
+    QString sessionArtist;
+    QString sessionSourceApp;
+    bool sessionPlaying = false;
+    QString lastSessionQuery;
+    QString currentTrackId;
 
     MediaDetector *mediaDetector = nullptr;
     LyricsClient *autoClient = nullptr;
@@ -114,7 +147,9 @@ private:
     void updateSyncedLine();
     void renderSynced();
     int effectiveFontSize() const;
-    void applyLabelFont();
+    int measureContentHeight(int width) const;
+    void applyTextFont();
+    void setDocumentHtml(const QString &html);
     void animateCaption();
     void fitToContent();
     void showStartupTip();
@@ -126,6 +161,8 @@ private:
     void updateTrayNowPlaying();
     void handleAutoResults(quint64 token, const QList<LyricsResult> &results);
     LyricsResult pickBest(const QList<LyricsResult> &results, const NowPlaying &np) const;
+    void startSong(const QString &title, const QString &artist, const QString &sourceApp, const QString &query);
+    inline QString makeTrackId(const QString &title, const QString &artist) const { return (title + QLatin1Char('|') + artist).toLower().trimmed(); }
 
 private slots:
     void onNowPlaying(const NowPlaying &nowPlaying);

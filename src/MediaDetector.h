@@ -29,7 +29,7 @@ public:
 
     explicit MediaDetector(QObject *parent = nullptr);
 
-    void start(int intervalMs = 1500);
+    void start(int intervalMs = 800);
     void stop();
     bool isRunning() const;
     void setInterval(int intervalMs);
