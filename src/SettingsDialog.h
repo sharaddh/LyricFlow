@@ -55,10 +55,12 @@ struct LyricStyleOptions {
     bool emphasizeWord = false;
     QString animation = QStringLiteral("Fade");
     int lineSpacing = 45;
+    int lyricOffsetMs = 0;   // + shows lyrics earlier, - shows them later
 
     // Caption typography, independent of the card look. One of:
-    // Classic / Instagram Story / Big & Small / Spotlight / Karaoke Glow.
-    QString captionStyle = QStringLiteral("Classic");
+    // Single Word / Classic / Instagram Story / Big & Small / Spotlight /
+    // Karaoke Glow.
+    QString captionStyle = QStringLiteral("Single Word");
 };
 
 class SettingsDialog final : public QDialog
@@ -103,6 +105,7 @@ private:
     QCheckBox *emphasizeBox = nullptr;
     QComboBox *animationBox = nullptr;
     QSpinBox *spacingBox = nullptr;
+    QSpinBox *offsetBox = nullptr;
 
     QColor chosenColor;
 };

@@ -37,9 +37,9 @@ QStringList SettingsDialog::availableUpcomingModes()
 
 QStringList SettingsDialog::availableCaptionStyles()
 {
-    return {QStringLiteral("Classic"), QStringLiteral("Instagram Story"),
-            QStringLiteral("Big & Small"), QStringLiteral("Spotlight"),
-            QStringLiteral("Karaoke Glow")};
+    return {QStringLiteral("Single Word"), QStringLiteral("Classic"),
+            QStringLiteral("Instagram Story"), QStringLiteral("Big & Small"),
+            QStringLiteral("Spotlight"), QStringLiteral("Karaoke Glow")};
 }
 
 StyleSkin SettingsDialog::styleSkin(const QString &style, int opacityPercent)
@@ -56,70 +56,84 @@ StyleSkin SettingsDialog::styleSkin(const QString &style, int opacityPercent)
         // No card at all - the text floats straight over the desktop.
         skin.drawsCard = false;
         skin.textColor = QStringLiteral("#ffffff");
-        skin.accentColor = QStringLiteral("#ffffff");
+        skin.accentColor = QStringLiteral("#eaf4ff");
         skin.padX = 18;
         skin.padY = 12;
     } else if (style == QLatin1String("Instagram")) {
         // The signature sunset gradient with a soft corner; opacity tints it.
         QLinearGradient g(0, 0, 1, 1);
-        g.setColorAt(0.0, col(254, 218, 117, a));
-        g.setColorAt(0.55, col(214, 41, 118, a));
-        g.setColorAt(1.0, col(150, 47, 191, a));
+        g.setColorAt(0.0, col(255, 211, 106, a));
+        g.setColorAt(0.52, col(255, 74, 142, a));
+        g.setColorAt(1.0, col(126, 61, 255, a));
         skin.fill = QBrush(g);
-        skin.radius = 22;
+        skin.borderColor = col(255, 255, 255, 55);
+        skin.borderWidth = 1;
+        skin.radius = 24;
         skin.textColor = QStringLiteral("#ffffff");
-        skin.accentColor = QStringLiteral("#ffffff");
+        skin.accentColor = QStringLiteral("#fff3bf");
         skin.padX = 30;
         skin.padY = 22;
     } else if (style == QLatin1String("Karaoke")) {
         // Deep aubergine stage with a hot-pink glow for the sung word.
-        skin.fill = QBrush(col(23, 19, 52, a));
-        skin.borderColor = col(255, 255, 255, 28);
+        QLinearGradient g(0, 0, 0, 1);
+        g.setColorAt(0.0, col(34, 23, 70, qBound(40, pct * 230 / 100, 235)));
+        g.setColorAt(1.0, col(13, 10, 29, qBound(30, pct * 220 / 100, 225)));
+        skin.fill = QBrush(g);
+        skin.borderColor = col(255, 95, 162, 85);
         skin.borderWidth = 1;
-        skin.radius = 18;
-        skin.textColor = QStringLiteral("#f8f6ff");
-        skin.accentColor = QStringLiteral("#ff4f9a");
+        skin.radius = 20;
+        skin.textColor = QStringLiteral("#fbf8ff");
+        skin.accentColor = QStringLiteral("#ff5fa2");
         skin.padX = 30;
         skin.padY = 22;
     } else if (style == QLatin1String("Minimal Bar")) {
         // Translucent frosted pill; the accent is a clean mint underline-style.
-        skin.fill = QBrush(col(255, 255, 255, qBound(5, pct * 22 / 100, 65)));
-        skin.borderColor = col(255, 255, 255, 90);
+        skin.fill = QBrush(col(13, 16, 24, qBound(40, pct * 205 / 100, 215)));
+        skin.borderColor = col(255, 255, 255, 58);
         skin.borderWidth = 1;
         skin.radius = 999;   // large radius clamps to a capsule
-        skin.textColor = QStringLiteral("#f2f4fc");
-        skin.accentColor = QStringLiteral("#16c79a");
+        skin.textColor = QStringLiteral("#f4f7ff");
+        skin.accentColor = QStringLiteral("#5ef2c1");
         skin.padX = 32;
         skin.padY = 14;
     } else if (style == QLatin1String("Neon")) {
         // Near-black neon board with an electric violet frame and mint glow.
-        skin.fill = QBrush(col(11, 11, 23, a));
-        skin.borderColor = col(109, 91, 255, 160);
+        QLinearGradient g(0, 0, 1, 1);
+        g.setColorAt(0.0, col(8, 9, 19, qBound(50, pct * 245 / 100, 245)));
+        g.setColorAt(1.0, col(17, 12, 36, qBound(40, pct * 235 / 100, 235)));
+        skin.fill = QBrush(g);
+        skin.borderColor = col(124, 107, 255, 190);
         skin.borderWidth = 1;
-        skin.radius = 16;
-        skin.textColor = QStringLiteral("#c9c4ff");
+        skin.radius = 18;
+        skin.textColor = QStringLiteral("#d6d0ff");
         skin.accentColor = QStringLiteral("#7dffc4");
         skin.padX = 30;
         skin.padY = 22;
     } else if (style == QLatin1String("Album Card")) {
         // A vinyl-album look: near-opaque ivory card with dark ink text and a
         // violet accent for the current word.
-        skin.fill = QBrush(col(250, 248, 255, qBound(120, pct * 255 / 100, 245)));
-        skin.borderColor = col(109, 91, 255, 110);
+        QLinearGradient g(0, 0, 0.4, 1);
+        g.setColorAt(0.0, col(255, 253, 247, qBound(150, pct * 255 / 100, 250)));
+        g.setColorAt(1.0, col(240, 236, 255, qBound(140, pct * 248 / 100, 245)));
+        skin.fill = QBrush(g);
+        skin.borderColor = col(109, 91, 255, 120);
         skin.borderWidth = 1;
-        skin.radius = 20;
-        skin.textColor = QStringLiteral("#1b1430");
-        skin.accentColor = QStringLiteral("#6d5bff");
+        skin.radius = 22;
+        skin.textColor = QStringLiteral("#191329");
+        skin.accentColor = QStringLiteral("#5b45ff");
         skin.padX = 30;
         skin.padY = 22;
     } else {
-        // Glass Card (default): light frost, translucent white card.
-        skin.fill = QBrush(col(255, 255, 255, qBound(5, pct * 38 / 100, 130)));
-        skin.borderColor = col(255, 255, 255, 110);
+        // Glass Card (default): smoked glass with a cool blue accent.
+        QLinearGradient g(0, 0, 0.35, 1);
+        g.setColorAt(0.0, col(29, 34, 51, qBound(35, pct * 210 / 100, 220)));
+        g.setColorAt(1.0, col(13, 17, 28, qBound(30, pct * 195 / 100, 210)));
+        skin.fill = QBrush(g);
+        skin.borderColor = col(255, 255, 255, 48);
         skin.borderWidth = 1;
-        skin.radius = 22;
-        skin.textColor = QStringLiteral("#ffffff");
-        skin.accentColor = QStringLiteral("#bfe2ff");
+        skin.radius = 24;
+        skin.textColor = QStringLiteral("#f7f9ff");
+        skin.accentColor = QStringLiteral("#8cc8ff");
         skin.padX = 30;
         skin.padY = 22;
     }
@@ -230,6 +244,7 @@ SettingsDialog::SettingsDialog(const LyricStyleOptions &options, QWidget *parent
     if (captionBox->currentIndex() < 0) captionBox->setCurrentIndex(0);
     captionBox->setToolTip(QStringLiteral(
         "How the words are typeset over any display style.\n"
+        "Single Word: one word at a time with a smooth slide / pop animation.\n"
         "Classic: the whole line with the sung word highlighted.\n"
         "Instagram Story: bold uppercase reveal with a highlight behind each word.\n"
         "Big & Small: the active word is large, the rest small.\n"
@@ -249,6 +264,16 @@ SettingsDialog::SettingsDialog(const LyricStyleOptions &options, QWidget *parent
     spacingBox->setValue(options.lineSpacing);
     spacingBox->setSuffix(QStringLiteral(" %"));
     spacingBox->setFixedWidth(84);
+
+    offsetBox = new QSpinBox(this);
+    offsetBox->setRange(-3000, 3000);
+    offsetBox->setSingleStep(50);
+    offsetBox->setValue(options.lyricOffsetMs);
+    offsetBox->setSuffix(QStringLiteral(" ms"));
+    offsetBox->setFixedWidth(96);
+    offsetBox->setToolTip(QStringLiteral(
+        "Fine-tune the timing against your player. Positive values show the lyrics\n"
+        "earlier; negative values show them later."));
 
     // ---- Automation -------------------------------------------------------
     autoDetectBox = new QCheckBox(QStringLiteral("Detect the playing song automatically"), this);
@@ -285,6 +310,7 @@ SettingsDialog::SettingsDialog(const LyricStyleOptions &options, QWidget *parent
     captions->addRow(QString(), emphasizeBox);
     captions->addRow(QStringLiteral("Line animation"), animationBox);
     captions->addRow(QStringLiteral("Line spacing"), spacingBox);
+    captions->addRow(QStringLiteral("Lyric timing"), offsetBox);
 
     auto *automation = new QFormLayout;
     automation->addRow(QString(), autoDetectBox);
@@ -413,6 +439,14 @@ void SettingsDialog::updatePreview()
     const StyleSkin skin = styleSkin(style, opacitySlider->value());
     const QString color = colorCheck->isChecked() ? chosenColor.name() : skin.textColor;
 
+    const QString caption = captionBox->currentText();
+    if (caption == QLatin1String("Single Word") || caption == QLatin1String("Spotlight"))
+        preview->setText(QStringLiteral("Imagine"));
+    else if (caption == QLatin1String("Instagram Story"))
+        preview->setText(QStringLiteral("IMAGINE ALL THE PEOPLE"));
+    else
+        preview->setText(QStringLiteral("Imagine all the people\nLiving life in peace"));
+
     preview->setStyleSheet(
         QStringLiteral("QLabel { %1 color:%2; padding:%3px %4px;"
                        " font-family:'%5'; font-size:%6px;"
@@ -442,6 +476,7 @@ void SettingsDialog::resetDefaults()
     emphasizeBox->setChecked(d.emphasizeWord);
     animationBox->setCurrentText(d.animation);
     spacingBox->setValue(d.lineSpacing);
+    offsetBox->setValue(d.lyricOffsetMs);
     autoDetectBox->setChecked(d.autoDetect);
     pollBox->setValue(qMax(1, d.pollIntervalMs / 1000));
     tipsBox->setChecked(d.showTips);
@@ -468,6 +503,7 @@ LyricStyleOptions SettingsDialog::options() const
     result.emphasizeWord = emphasizeBox->isChecked();
     result.animation = animationBox->currentText();
     result.lineSpacing = spacingBox->value();
+    result.lyricOffsetMs = offsetBox->value();
     result.showTips = tipsBox->isChecked();
     result.startWithWindows = startupBox->isChecked();
     return result;
