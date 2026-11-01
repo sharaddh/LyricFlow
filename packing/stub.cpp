@@ -8,6 +8,7 @@
 #include <shlobj.h>
 #include <zlib.h>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -108,6 +109,25 @@ void fail(const std::wstring &msg)
     MessageBoxW(nullptr, msg.c_str(), L"Capson", MB_ICONERROR | MB_OK);
 }
 
+// FNV-1a 64 hash over the whole payload entry table (names + sizes + flags).
+// Any file added, removed, renamed or resized in the payload changes it, so a
+// stub with a different hash re-extracts even if Capson.exe itself is unchanged.
+struct Hasher {
+    uint64_t h = 1469598103934665603ULL;
+    void write(const void *p, size_t n) {
+        const uint8_t *q = static_cast<const uint8_t *>(p);
+        for (size_t i = 0; i < n; ++i) { h ^= q[i]; h *= 1099511628211ULL; }
+    }
+    void writeU32(uint32_t v) { write(&v, sizeof(v)); }
+};
+
+std::string toHex(uint64_t v)
+{
+    char buf[17];
+    snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(v));
+    return std::string(buf);
+}
+
 bool inflateRaw(const unsigned char *in, size_t inLen, size_t expected,
                 std::vector<unsigned char> &out)
 {
@@ -157,10 +177,11 @@ int wmain()
     const size_t count = readU32(tableOff);
     std::vector<FileEntry> entries;
     size_t cursor = tableOff + 4;
-    uint64_t exeSize = 0;
     bool foundExe = false;
+    Hasher fp;
     const size_t tableEnd = trailer;   // the table ends right before the 16-byte trailer
-    for (size_t i = 0; i < count && cursor + 14 <= tableEnd; ++i) {
+    size_t i = 0;
+    for (; i < count && cursor + 14 <= tableEnd; ++i) {
         const bool isDir = (buf[cursor++] != 0);
         const bool compressed = (buf[cursor++] != 0);
         const uint32_t nameLen = readU32(cursor); cursor += 4;
@@ -170,17 +191,30 @@ int wmain()
         std::string name(reinterpret_cast<const char *>(buf.data() + cursor), nameLen);
         cursor += nameLen;
         entries.push_back({isDir, compressed, name, dataLen, compLen});
-        if (!isDir && name == "Capson.exe") { exeSize = dataLen; foundExe = true; }
+        if (!isDir && name == "Capson.exe") { foundExe = true; }
+
+        const uint8_t dirFlag = isDir ? 1 : 0;
+        const uint8_t compFlag = compressed ? 1 : 0;
+        fp.write(&dirFlag, sizeof(dirFlag));
+        fp.write(&compFlag, sizeof(compFlag));
+        fp.write(name.data(), name.size());
+        fp.writeU32(dataLen);
+        fp.writeU32(compLen);
+        if (name == ".capson-payload") { fail(L"Package contains a reserved file name."); return 1; }
     }
+    if (i != count) { fail(L"Package table is damaged."); return 1; }
     if (!foundExe) { fail(L"Package is missing the application."); return 1; }
 
     std::wstring target;
     if (!localAppDataDir(target)) { fail(L"Could not resolve the local AppData folder."); return 1; }
     target += L"\\Capson\\app";
     const std::wstring exePath = target + L"\\Capson.exe";
+    const std::wstring markerPath = target + L"\\.capson-payload";
+    const std::string wantFp = toHex(fp.h);
 
-    std::ifstream existing(exePath.c_str(), std::ios::binary | std::ios::ate);
-    const bool upToDate = existing && existing.tellg() == static_cast<std::streamoff>(exeSize);
+    const std::vector<unsigned char> marker = readWholeFile(markerPath);
+    const std::string haveFp(marker.begin(), marker.end());
+    const bool upToDate = (haveFp == wantFp);
 
     if (!upToDate) {
         removeTree(target);
@@ -206,6 +240,7 @@ int wmain()
             }
             dataCursor += entry.compSize;
         }
+        writeFile(markerPath, reinterpret_cast<const unsigned char *>(wantFp.data()), wantFp.size());
     }
 
     STARTUPINFOW si;
