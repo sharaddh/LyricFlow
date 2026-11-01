@@ -7,6 +7,7 @@
 #include <QCursor>
 #include <QDir>
 #include <QFont>
+#include <QFontMetricsF>
 #include <QIcon>
 #include <QGuiApplication>
 #include <QLinearGradient>
@@ -98,7 +99,8 @@ OverlayWindow::OverlayWindow(QWidget *parent) : QWidget(parent)
     textDoc->setTextWidth(qMax(160, width() - 2 * padX));
 
     syncTimer = new QTimer(this);
-    syncTimer->setInterval(80);
+    syncTimer->setTimerType(Qt::PreciseTimer);
+    syncTimer->setInterval(16);   // detect word boundaries within one video frame
     connect(syncTimer, &QTimer::timeout, this, &OverlayWindow::updateSyncedLine);
 
     fadeAnimation = new QPropertyAnimation(this, "textOpacity", this);
@@ -111,6 +113,10 @@ OverlayWindow::OverlayWindow(QWidget *parent) : QWidget(parent)
     connect(scaleAnimation, &QVariantAnimation::valueChanged, this, [this](const QVariant &value) {
         setCaptionScale(value.toReal());
     });
+
+    wordAnimation = new QPropertyAnimation(this, "wordProgress", this);
+    wordAnimation->setDuration(220);
+    wordAnimation->setEasingCurve(QEasingCurve::OutCubic);
 
     // Real playback position / play-pause state from the OS media session so the
     // lyrics stay in sync when the user pauses, seeks or jumps in the track.
@@ -187,6 +193,7 @@ OverlayWindow::OverlayWindow(QWidget *parent) : QWidget(parent)
 void OverlayWindow::updateText()
 {
     lastRenderedHtml.clear();
+    m_wordModeActive = false;
 
     if (showingTip) {
         const int tipSize = qMax(12, fontSize * 55 / 100);
@@ -250,6 +257,7 @@ void OverlayWindow::applyStyle()
     skinRadius = skin.radius;
     drawsCard = skin.drawsCard;
 
+    m_lyricsDirty = true;
     applyTextFont();
     update();
     fitToContent();
@@ -263,9 +271,38 @@ void OverlayWindow::paintEvent(QPaintEvent *event)
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::TextAntialiasing);
 
     if (drawsCard) {
-        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        const qreal inset = cardInset();
+        const QRectF r = QRectF(rect()).adjusted(inset, inset, -inset, -inset);
+
+        // Soft drop shadow so the card feels like it floats above the desktop.
+        painter.setPen(Qt::NoPen);
+        const int shadowAlpha = qBound(10, opacityPercent * 42 / 100, 48);
+        for (int i = 6; i >= 1; --i) {
+            const qreal spread = i * 0.75;
+            QColor shadow(3, 6, 16, shadowAlpha / (i + 1));
+            painter.setBrush(shadow);
+            painter.drawRoundedRect(r.adjusted(-spread, -spread * 0.55 + 3.0,
+                                               spread, spread * 1.15 + 3.0),
+                                    skinRadius + spread, skinRadius + spread);
+        }
+
+        // Neon and Karaoke get a faint halo in their accent colour.
+        if (currentStyle == QLatin1String("Neon") || currentStyle == QLatin1String("Karaoke")) {
+            QColor glow(resolvedAccentColor);
+            if (glow.isValid()) {
+                for (int i = 3; i >= 1; --i) {
+                    glow.setAlpha(22 / i);
+                    painter.setPen(QPen(glow, i * 2.0));
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawRoundedRect(r.adjusted(-i * 0.5, -i * 0.5, i * 0.5, i * 0.5),
+                                            skinRadius + i * 0.5, skinRadius + i * 0.5);
+                }
+            }
+        }
+
         if (skinBorderWidth > 0 && skinBorderColor.alpha() > 0)
             painter.setPen(QPen(skinBorderColor, skinBorderWidth));
         else
@@ -273,7 +310,7 @@ void OverlayWindow::paintEvent(QPaintEvent *event)
 
         if (skinFill.style() == Qt::LinearGradientPattern && skinFill.gradient()) {
             const auto *src = static_cast<const QLinearGradient *>(skinFill.gradient());
-            QLinearGradient g(rect().topLeft(), rect().bottomRight());
+            QLinearGradient g(r.topLeft(), r.bottomRight());
             for (const auto &stop : src->stops())
                 g.setColorAt(stop.first, stop.second);
             painter.setBrush(g);
@@ -282,6 +319,24 @@ void OverlayWindow::paintEvent(QPaintEvent *event)
         }
 
         painter.drawRoundedRect(r, skinRadius, skinRadius);
+
+        // A subtle top gloss reads as glass without hiding the content behind it.
+        const QColor ink(resolvedTextColor);
+        if (ink.lightness() > 140) {
+            QLinearGradient gloss(r.topLeft(), QPointF(r.left(), r.top() + r.height() * 0.55));
+            gloss.setColorAt(0.0, QColor(255, 255, 255, 34));
+            gloss.setColorAt(1.0, QColor(255, 255, 255, 0));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(gloss);
+            const qreal radius = qMax<qreal>(0, skinRadius - 1);
+            painter.drawRoundedRect(r.adjusted(1, 1, -1, -1), radius, radius);
+        }
+    }
+
+    // Single-word captions are painted directly so they can animate smoothly.
+    if (usesSingleWordCaptions()) {
+        paintSingleWord(painter);
+        return;
     }
 
     // Draw the lyrics. The document already wrapped itself to exactly this width,
@@ -302,6 +357,201 @@ void OverlayWindow::paintEvent(QPaintEvent *event)
     }
 }
 
+QFont OverlayWindow::captionFont(int pixelSize, bool bold) const
+{
+    QFont f(fontFamily);
+    f.setPixelSize(qMax(6, pixelSize));
+    f.setBold(bold);
+    // Fall back to fonts that actually carry Indic (Devanagari) and symbol
+    // glyphs so Hindi lyrics and their vowel marks render instead of vanishing.
+    f.setFamilies({fontFamily, QStringLiteral("Nirmala UI"), QStringLiteral("Segoe UI"),
+                   QStringLiteral("Segoe UI Symbol"), QStringLiteral("Segoe UI Emoji")});
+    return f;
+}
+
+void OverlayWindow::setWordProgress(qreal progress)
+{
+    if (qFuzzyCompare(m_wordProgress, progress)) return;
+    m_wordProgress = progress;
+    update();
+}
+
+void OverlayWindow::restartWordAnimation(int durationMs)
+{
+    if (!wordAnimation || animationType == QLatin1String("None")) {
+        m_wordProgress = 1.0;
+        update();
+        return;
+    }
+
+    wordAnimation->stop();
+    m_wordProgress = 0.0;
+    wordAnimation->setDuration(qBound(70, durationMs, 280));
+    wordAnimation->setStartValue(0.0);
+    wordAnimation->setEndValue(1.0);
+    wordAnimation->start();
+    update();
+}
+
+bool OverlayWindow::usesSingleWordCaptions() const
+{
+    if (showingTip || syncedLines.isEmpty() || !syncTimer || !syncTimer->isActive())
+        return false;
+    return captionStyle == QLatin1String("Single Word")
+        || captionStyle == QLatin1String("Spotlight");
+}
+
+int OverlayWindow::singleWordContentHeight() const
+{
+    const int fs = effectiveFontSize();
+    const qreal wordScale = captionStyle == QLatin1String("Spotlight") ? 1.9 : 1.55;
+    const QFontMetricsF wordMetrics(captionFont(qRound(fs * wordScale), fontBold));
+
+    qreal infoHeight = 0;
+    qreal gap = 0;
+    if (showSongInfo) {
+        const QFontMetricsF infoMetrics(
+            captionFont(qMax(11, fs * 45 / 100), fontBold));
+        infoHeight = infoMetrics.height();
+        gap = qMax(6, fs * lineSpacing / 100);
+    }
+    return qCeil(infoHeight + gap + wordMetrics.height() + 14);
+}
+
+void OverlayWindow::paintSingleWord(QPainter &painter)
+{
+    const int fs = effectiveFontSize();
+    const bool spotlight = captionStyle == QLatin1String("Spotlight");
+    const qreal wordScale = spotlight ? 1.9 : 1.55;
+    const qreal contentWidth = qMax(120, width() - 2 * padX);
+    const qreal top = padY;
+
+    QColor base(resolvedTextColor);
+    if (!base.isValid()) base = QColor(Qt::white);
+    base.setAlpha(255);
+    QColor accent(resolvedAccentColor);
+    if (!accent.isValid()) accent = base;
+    accent.setAlpha(255);
+
+    qreal infoHeight = 0;
+    qreal gap = 0;
+    if (showSongInfo) {
+        QFont infoFont = captionFont(qMax(11, fs * 45 / 100), fontBold);
+        infoFont.setWeight(fontBold ? QFont::DemiBold : QFont::Normal);
+        const QFontMetricsF infoMetrics(infoFont);
+        infoHeight = infoMetrics.height();
+        gap = qMax(6, fs * lineSpacing / 100);
+
+        QString info = currentSong;
+        if (!currentArtist.isEmpty())
+            info += QStringLiteral(" \u2013 ") + currentArtist;
+        info = infoMetrics.elidedText(info, Qt::ElideRight, qRound(contentWidth));
+
+        painter.save();
+        painter.setFont(infoFont);
+        QColor infoColor(base);
+        infoColor.setAlphaF(infoColor.alphaF() * 0.82 * m_textOpacity);
+        painter.setPen(infoColor);
+        painter.drawText(QRectF(padX, top, contentWidth, infoHeight),
+                         Qt::AlignHCenter | Qt::AlignVCenter, info);
+        painter.restore();
+    }
+
+    if (m_activeWord.isEmpty())
+        return;
+
+    const qreal wordsTop = top + infoHeight + gap;
+    const qreal wordsHeight = qMax<qreal>(1, height() - padY - wordsTop);
+    const qreal centerY = wordsTop + wordsHeight / 2.0;
+
+    const qreal progress = animationType == QLatin1String("None")
+        ? 1.0
+        : qBound<qreal>(0.0, m_wordProgress, 1.0);
+    const bool pop = animationType == QLatin1String("Pop");
+    const qreal currentAlpha = pop ? 0.18 + 0.82 * progress : 0.42 + 0.58 * progress;
+    const qreal currentOffset = pop ? 0.0 : (1.0 - progress) * qMin<qreal>(14.0, fs * 0.55);
+    const qreal currentScale = pop ? 0.82 + 0.18 * progress : 1.0;
+
+    const QFont baseFont = captionFont(qRound(fs * wordScale), fontBold);
+
+    const auto drawWord = [&](const QString &text, qreal alpha, qreal scale,
+                              qreal dy, const QColor &color, bool pill) {
+        if (text.isEmpty() || alpha <= 0.01)
+            return;
+
+        QFont font = baseFont;
+        qreal pixelSize = fs * wordScale * scale;
+        font.setPixelSize(qMax(6, qRound(pixelSize)));
+        QFontMetricsF metrics(font);
+        const qreal maxWidth = contentWidth - (pill ? 44 : 10);
+        const qreal measured = metrics.horizontalAdvance(text);
+        if (measured > maxWidth && measured > 0) {
+            pixelSize *= maxWidth / measured;
+            font.setPixelSize(qMax(6, qRound(pixelSize)));
+            metrics = QFontMetricsF(font);
+        }
+
+        const qreal advance = metrics.horizontalAdvance(text);
+        const QRectF box(width() / 2.0 - advance / 2.0,
+                         centerY + dy - metrics.ascent(),
+                         advance, metrics.height());
+
+        painter.setFont(font);
+
+        if (pill) {
+            const qreal pad = qMax<qreal>(12, metrics.height() * 0.22);
+            const QRectF pillRect = box.adjusted(-pad, -metrics.height() * 0.08,
+                                                 pad, metrics.height() * 0.08);
+            const bool lightText = base.lightness() > 140;
+
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(0, 0, 0, qRound(75 * alpha * m_textOpacity)));
+            painter.drawRoundedRect(pillRect.translated(0, 3),
+                                    pillRect.height() / 2.0, pillRect.height() / 2.0);
+
+            QLinearGradient glass(pillRect.topLeft(), pillRect.bottomLeft());
+            QColor topColor = lightText ? QColor(18, 23, 38) : QColor(255, 255, 255);
+            topColor.setAlphaF((lightText ? 0.76 : 0.88) * alpha * m_textOpacity);
+            QColor bottomColor = lightText ? QColor(8, 11, 20) : QColor(242, 240, 252);
+            bottomColor.setAlphaF((lightText ? 0.58 : 0.72) * alpha * m_textOpacity);
+            glass.setColorAt(0.0, topColor);
+            glass.setColorAt(1.0, bottomColor);
+
+            painter.setBrush(glass);
+            QColor edge(accent);
+            edge.setAlpha(qRound(125 * alpha * m_textOpacity));
+            painter.setPen(QPen(edge, 1));
+            painter.drawRoundedRect(pillRect, pillRect.height() / 2.0, pillRect.height() / 2.0);
+        }
+
+        QColor shadow(0, 0, 0, qRound(120 * alpha * m_textOpacity));
+        painter.setPen(shadow);
+        painter.drawText(box.translated(0, qMax<qreal>(1.0, metrics.height() * 0.045)),
+                         Qt::AlignCenter, text);
+
+        QColor fill(color);
+        fill.setAlphaF(fill.alphaF() * alpha * m_textOpacity);
+        painter.setPen(fill);
+        painter.drawText(box, Qt::AlignCenter, text);
+    };
+
+    painter.save();
+    painter.setClipRect(rect());
+
+    if (!m_previousWord.isEmpty() && progress < 0.999) {
+        const qreal previousAlpha = (1.0 - progress) * (pop ? 0.32 : 0.46);
+        const qreal previousOffset = pop ? 0.0 : -progress * qMin<qreal>(12.0, fs * 0.45);
+        const qreal previousScale = pop ? 1.0 + 0.04 * progress : 1.0;
+        drawWord(m_previousWord, previousAlpha, previousScale, previousOffset,
+                 spotlight ? accent : base, !spotlight);
+    }
+
+    drawWord(m_activeWord, currentAlpha, currentScale, currentOffset,
+             spotlight ? accent : base, !spotlight);
+
+    painter.restore();
+}
+
 int OverlayWindow::effectiveFontSize() const
 {
     return qMax(6, qRound(fontSize * m_captionScale));
@@ -309,13 +559,7 @@ int OverlayWindow::effectiveFontSize() const
 
 void OverlayWindow::applyTextFont()
 {
-    QFont f(fontFamily, effectiveFontSize());
-    f.setBold(fontBold);
-    // Fall back to fonts that actually carry Indic (Devanagari) and symbol
-    // glyphs so Hindi lyrics and their vowel marks render instead of vanishing.
-    f.setFamilies({fontFamily, QStringLiteral("Nirmala UI"), QStringLiteral("Segoe UI"),
-                   QStringLiteral("Segoe UI Symbol"), QStringLiteral("Segoe UI Emoji")});
-    textDoc->setDefaultFont(f);
+    textDoc->setDefaultFont(captionFont(effectiveFontSize(), fontBold));
     if (!syncedLines.isEmpty() && syncTimer->isActive())
         renderSynced();
 }
@@ -381,6 +625,7 @@ LyricStyleOptions OverlayWindow::currentOptions() const
     options.emphasizeWord = emphasizeWord;
     options.animation = animationType;
     options.lineSpacing = lineSpacing;
+    options.lyricOffsetMs = lyricOffsetMs;
     options.showTips = showTips;
     options.startWithWindows = startWithWindows;
     return options;
@@ -404,6 +649,7 @@ void OverlayWindow::applyOptions(const LyricStyleOptions &options)
     captionStyle = options.captionStyle;
     animationType = options.animation;
     lineSpacing = options.lineSpacing;
+    lyricOffsetMs = qBound(-3000, options.lyricOffsetMs, 3000);
     showTips = options.showTips;
     startWithWindows = options.startWithWindows;
 
@@ -467,6 +713,14 @@ void OverlayWindow::loadLyrics(const LyricsResult &result)
     plainLyrics = result.plainLyrics;
     syncedLines.clear();
     parseSyncedLyrics(result.syncedLyrics);
+    m_lyricsDirty = true;
+    m_wordModeActive = false;
+    m_activeWord.clear();
+    m_previousWord.clear();
+    m_wordLineIndex = -1;
+    m_wordIndex = -1;
+    m_wordProgress = 1.0;
+    if (wordAnimation) wordAnimation->stop();
 
     if (!syncedLines.isEmpty()) {
         elapsedOffset = QDateTime::currentMSecsSinceEpoch();
@@ -500,8 +754,10 @@ void OverlayWindow::fitToContent()
     // Wrap the document at exactly the width it will be painted at (window minus
     // padding) so the measured height and the painted height can never disagree.
     const int contentWidth = qMax(160, width() - 2 * padX);
-    const int docHeight = measureContentHeight(contentWidth);
-    const int target = qMax(minimumHeight(), docHeight + 2 * padY + 6);
+    const int docHeight = usesSingleWordCaptions()
+        ? singleWordContentHeight()
+        : measureContentHeight(contentWidth);
+    const int target = qMax(minimumHeight(), docHeight + 2 * padY + 2 * cardInset() + 6);
     if (target != height())
         resize(width(), target);
     update();
@@ -609,15 +865,64 @@ void OverlayWindow::parseSyncedLyrics(const QString &synced)
         QVector<QRegularExpressionMatch> tags;
         while (it.hasNext()) tags.append(it.next());
         if (!tags.isEmpty()) {
+            const auto tagTime = [&fractionToMs](const QRegularExpressionMatch &tag) {
+                return (tag.captured(1).toLongLong() * 60
+                        + tag.captured(2).toLongLong()) * 1000
+                    + fractionToMs(tag.captured(3));
+            };
+
+            // Some providers put one enhanced-LRC tag on a whole phrase. Split
+            // that phrase into real words and spread them across the segment so
+            // a single-word caption never has to show a long line at once.
+            const auto appendSegment = [&words](const QString &segment,
+                                                qint64 startMs, qint64 endMs) {
+                if (segment.isEmpty())
+                    return;
+                const QStringList parts = segment.split(
+                    QRegularExpression(QStringLiteral(R"(\s+)")), Qt::SkipEmptyParts);
+                if (parts.size() <= 1) {
+                    words.append({startMs, segment});
+                    return;
+                }
+
+                QVector<int> weights;
+                int total = 0;
+                for (const QString &part : parts) {
+                    const int weight = qMax(1, part.size());
+                    weights.append(weight);
+                    total += weight;
+                }
+                qint64 span = endMs - startMs;
+                if (span <= 0) {
+                    span = static_cast<qint64>(total) * 220;
+                } else {
+                    // Do not let a long instrumental gap stretch the words of a
+                    // phrase: estimate a natural singing pace instead.
+                    span = qMin(span, qMax<qint64>(1200,
+                                                   static_cast<qint64>(total) * 130));
+                }
+                qint64 acc = 0;
+                for (int p = 0; p < parts.size(); ++p) {
+                    words.append({startMs + span * acc / total, parts.at(p)});
+                    acc += weights.at(p);
+                }
+            };
+
+            // Text before the first tag belongs to the line's own timestamp.
+            const QString prefix = entry.content.left(tags.first().capturedStart()).trimmed();
+            appendSegment(prefix, out.milliseconds, tagTime(tags.first()));
+
             for (int t = 0; t < tags.size(); ++t) {
                 const auto &tag = tags.at(t);
-                const qint64 ms = (tag.captured(1).toLongLong() * 60 + tag.captured(2).toLongLong()) * 1000
-                    + fractionToMs(tag.captured(3));
+                const qint64 segmentStart = tagTime(tag);
+                const qint64 segmentEnd = (t + 1 < tags.size())
+                    ? tagTime(tags.at(t + 1))
+                    : out.endMilliseconds;
                 const int start = tag.capturedEnd();
                 const int end = (t + 1 < tags.size()) ? tags.at(t + 1).capturedStart()
                                                       : entry.content.size();
-                const QString text = entry.content.mid(start, end - start).trimmed();
-                if (!text.isEmpty()) words.append({ms, text});
+                appendSegment(entry.content.mid(start, end - start).trimmed(),
+                              segmentStart, segmentEnd);
             }
         }
 
@@ -633,7 +938,14 @@ void OverlayWindow::parseSyncedLyrics(const QString &synced)
                     total += weight;
                 }
                 qint64 span = out.endMilliseconds - out.milliseconds;
-                if (span <= 0) span = static_cast<qint64>(total) * 300;
+                if (span <= 0) {
+                    span = static_cast<qint64>(total) * 300;
+                } else {
+                    // Keep a long gap before the next line from delaying the
+                    // later words of this line.
+                    span = qMin(span, qMax<qint64>(1500,
+                                                   static_cast<qint64>(total) * 130));
+                }
                 qint64 acc = 0;
                 for (int p = 0; p < parts.size(); ++p) {
                     const qint64 when = out.milliseconds + span * acc / total;
@@ -656,9 +968,12 @@ void OverlayWindow::parseSyncedLyrics(const QString &synced)
 qint64 OverlayWindow::currentPlaybackMs() const
 {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 position = 0;
     if (mediaSessionActive && haveSyncBase && positionTrustworthy)
-        return syncBaseMs + (mediaPlaying ? now - syncBaseStampMs : 0);
-    return now - elapsedOffset;
+        position = syncBaseMs + (mediaPlaying ? now - syncBaseStampMs : 0);
+    else
+        position = now - elapsedOffset;
+    return qMax<qint64>(0, position + lyricOffsetMs);
 }
 
 void OverlayWindow::onMediaState(const MediaState &state)
@@ -680,24 +995,44 @@ void OverlayWindow::onMediaState(const MediaState &state)
     sessionPlaying = state.isPlaying();
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 reported = qMax<qint64>(0, state.positionMs);
     if (state.positionMs > 0 || state.durationMs > 0)
         positionTrustworthy = true;
 
-    if (!mediaSessionActive || !haveSyncBase) {
-        syncBaseMs = state.positionMs;
+    const bool wasPlaying = mediaPlaying;
+    const bool isPlaying = state.isPlaying();
+
+    if (!mediaSessionActive || !haveSyncBase || !hasLastReport
+        || wasPlaying != isPlaying) {
+        // First report, resume after a pause, or a play/pause transition: anchor
+        // the clock exactly to the OS position.
+        syncBaseMs = reported;
         syncBaseStampMs = now;
         haveSyncBase = true;
-    } else if (!hasLastReport || state.positionMs != lastReportedMs || qAbs(state.positionMs - lastReportedMs) > 1000) {
-        // A fresh report: trust it. Big jumps are seeks; small ones are the
-        // normal tick. Either way we re-anchor so the overlay tracks exactly.
-        syncBaseMs = state.positionMs;
-        syncBaseStampMs = now;
+    } else if (reported != lastReportedMs) {
+        // Most players only update their position about once a second. Run our
+        // own clock between reports, and only nudge/snap when it actually drifts.
+        // A player that keeps reporting the same position never drags us back.
+        const qint64 predicted = syncBaseMs
+            + (wasPlaying ? now - syncBaseStampMs : 0);
+        const qint64 drift = reported - predicted;
+
+        if (qAbs(drift) > 700) {
+            // A seek (or the player jumped): follow it immediately.
+            syncBaseMs = reported;
+            syncBaseStampMs = now;
+        } else if (qAbs(drift) > 60) {
+            // Gently pull our clock toward the reported position instead of
+            // jumping, so captions never visibly stutter.
+            syncBaseMs += drift * 3 / 10;
+            syncBaseStampMs = now;
+        }
+        // else: our estimate is close enough - leave the smooth clock alone.
     }
-    // else: the player kept reporting the same position - keep our own clock running.
 
     hasLastReport = true;
-    lastReportedMs = state.positionMs;
-    mediaPlaying = state.isPlaying();
+    lastReportedMs = reported;
+    mediaPlaying = isPlaying;
     mediaSessionActive = true;
 
     if (!syncedLines.isEmpty()) {
@@ -711,7 +1046,6 @@ void OverlayWindow::renderSynced()
 
     const qint64 pos = currentPlaybackMs();
     int lineIndex = 0;
-    if (syncedLines.isEmpty()) return;
     for (int i = 0; i < syncedLines.size(); ++i) {
         if (syncedLines.at(i).milliseconds <= pos) lineIndex = i;
         else break;
@@ -724,6 +1058,44 @@ void OverlayWindow::renderSynced()
         if (line.words.at(w).milliseconds <= pos) wordIndex = w;
         else break;
     }
+
+    if (usesSingleWordCaptions()) {
+        if (!m_lyricsDirty && m_wordModeActive
+            && lineIndex == lastLineIndex && wordIndex == lastWordIndex) {
+            return;
+        }
+        if (!m_wordModeActive) {
+            m_wordModeActive = true;
+            textDoc->setHtml(QString());
+            renderedHtml.clear();
+            lastRenderedHtml.clear();
+            if (!qFuzzyCompare(m_textOpacity, 1.0))
+                setTextOpacity(1.0);
+        }
+        m_captionScale = 1.0;
+        if (scaleAnimation) scaleAnimation->stop();
+        updateSingleWord(line, lineIndex, wordIndex);
+        currentLyrics = line.text;
+        lastLineIndex = lineIndex;
+        lastWordIndex = wordIndex;
+        m_lyricsDirty = false;
+        fitToContent();
+        update();
+        return;
+    }
+
+    if (m_wordModeActive) {
+        m_wordModeActive = false;
+        m_activeWord.clear();
+        m_previousWord.clear();
+        m_wordLineIndex = -1;
+        m_wordIndex = -1;
+        if (wordAnimation) wordAnimation->stop();
+        m_lyricsDirty = true;
+    }
+
+    if (!m_lyricsDirty && lineIndex == lastLineIndex && wordIndex == lastWordIndex)
+        return;
 
     QColor base(resolvedTextColor);
     if (!base.isValid()) base = QColor(Qt::white);
@@ -882,6 +1254,44 @@ void OverlayWindow::renderSynced()
     if (spotlight ? wordChanged : lineChanged) {
         animateCaption();
     }
+    m_lyricsDirty = false;
+}
+
+void OverlayWindow::updateSingleWord(const LyricLine &line, int lineIndex, int wordIndex)
+{
+    QString active;
+    if (wordIndex >= 0 && wordIndex < line.words.size())
+        active = line.words.at(wordIndex).text;
+
+    const bool newLine = (lineIndex != m_wordLineIndex);
+    const bool newWord = newLine || (wordIndex != m_wordIndex);
+    if (!newWord && active == m_activeWord)
+        return;
+
+    const QString previous = m_activeWord;
+    m_activeWord = active;
+    m_previousWord = (newLine || previous.isEmpty()) ? QString() : previous;
+    m_wordLineIndex = lineIndex;
+    m_wordIndex = wordIndex;
+
+    if (active.isEmpty()) {
+        if (wordAnimation) wordAnimation->stop();
+        m_wordProgress = 1.0;
+        update();
+        return;
+    }
+
+    qint64 interval = 220;
+    if (wordIndex >= 0 && wordIndex + 1 < line.words.size()) {
+        const qint64 next = line.words.at(wordIndex + 1).milliseconds;
+        const qint64 current = line.words.at(wordIndex).milliseconds;
+        if (next > current) interval = next - current;
+    } else if (line.endMilliseconds > line.milliseconds && !line.words.isEmpty()) {
+        interval = qMax<qint64>(120, (line.endMilliseconds - line.milliseconds)
+                                        / line.words.size());
+    }
+
+    restartWordAnimation(int(qBound<qint64>(70, interval, qint64(280))));
 }
 
 LyricsResult OverlayWindow::pickBest(const QList<LyricsResult> &results, const NowPlaying &np) const
@@ -924,14 +1334,14 @@ void OverlayWindow::startSong(const QString &title, const QString &artist,
         showingTip = false;
         if (tipTimer) tipTimer->stop();
     }
-        const QString tid = makeTrackId(title, artist);
-        if (songActive && tid == currentTrackId && !syncedLines.isEmpty()) {
-            currentLyrics = QStringLiteral("Searching lyrics for \"%1\"...").arg(title);
-            updateText();
-            const quint64 token = ++autoRequestId;
-            autoClient->searchAuto(title, artist, query, token);
-            return;
-        }
+    const QString tid = makeTrackId(title, artist);
+    if (songActive && tid == currentTrackId && !syncedLines.isEmpty()) {
+        currentLyrics = QStringLiteral("Searching lyrics for \"%1\"...").arg(title);
+        updateText();
+        const quint64 token = ++autoRequestId;
+        autoClient->searchAuto(title, artist, query, token);
+        return;
+    }
 
     songActive = true;
     currentTrackId = tid;
@@ -941,17 +1351,22 @@ void OverlayWindow::startSong(const QString &title, const QString &artist,
     syncedLines.clear();
     syncTimer->stop();
     plainLyrics.clear();
-            haveSyncBase = false;
-            positionTrustworthy = false;
-            hasLastReport = false;
-            lastLineIndex = -1;
-            lastWordIndex = -1;
-            m_captionScale = 1.0;
-            setTextOpacity(1.0);
-            currentTrackId.clear();
-            syncedLines.clear();
-            syncTimer->stop();
-            updateText();
+    haveSyncBase = false;
+    positionTrustworthy = false;
+    hasLastReport = false;
+    lastLineIndex = -1;
+    lastWordIndex = -1;
+    m_captionScale = 1.0;
+    m_lyricsDirty = true;
+    m_wordModeActive = false;
+    m_activeWord.clear();
+    m_previousWord.clear();
+    m_wordLineIndex = -1;
+    m_wordIndex = -1;
+    m_wordProgress = 1.0;
+    if (wordAnimation) wordAnimation->stop();
+    setTextOpacity(1.0);
+    updateText();
     updateTrayNowPlaying();
 
     const quint64 token = ++autoRequestId;
@@ -965,8 +1380,9 @@ void OverlayWindow::onNowPlaying(const NowPlaying &np)
         return;
     }
 
-    // Prefer MediaSession when playing as it's more reliable and stable
-    if (sessionPlaying && !sessionTitle.isEmpty()) {
+    // Prefer MediaSession: it is more reliable than window titles and keeps the
+    // current lyrics on screen while the track is paused.
+    if (!sessionTitle.isEmpty()) {
         const QString query = sessionArtist.isEmpty()
             ? sessionTitle
             : sessionArtist + QStringLiteral(" ") + sessionTitle;
@@ -1006,6 +1422,14 @@ void OverlayWindow::onNowPlaying(const NowPlaying &np)
         lastLineIndex = -1;
         lastWordIndex = -1;
         m_captionScale = 1.0;
+        m_lyricsDirty = true;
+        m_wordModeActive = false;
+        m_activeWord.clear();
+        m_previousWord.clear();
+        m_wordLineIndex = -1;
+        m_wordIndex = -1;
+        m_wordProgress = 1.0;
+        if (wordAnimation) wordAnimation->stop();
         setTextOpacity(1.0);
         currentTrackId.clear();
         syncedLines.clear();
@@ -1159,6 +1583,7 @@ void OverlayWindow::saveSettings()
     settings.setValue(QStringLiteral("emphasizeWord"), emphasizeWord);
     settings.setValue(QStringLiteral("captionAnimation"), animationType);
     settings.setValue(QStringLiteral("lineSpacing"), lineSpacing);
+    settings.setValue(QStringLiteral("lyricOffsetMs"), lyricOffsetMs);
     settings.setValue(QStringLiteral("showTips"), showTips);
     settings.setValue(QStringLiteral("startWithWindows"), startWithWindows);
 }
@@ -1182,7 +1607,22 @@ void OverlayWindow::loadSettings()
     emphasizeWord = settings.value(QStringLiteral("emphasizeWord"), emphasizeWord).toBool();
     animationType = settings.value(QStringLiteral("captionAnimation"), animationType).toString();
     lineSpacing = settings.value(QStringLiteral("lineSpacing"), lineSpacing).toInt();
+    lyricOffsetMs = qBound(-3000,
+                           settings.value(QStringLiteral("lyricOffsetMs"), lyricOffsetMs).toInt(),
+                           3000);
     showTips = settings.value(QStringLiteral("showTips"), showTips).toBool();
+
+    // Existing installations used "Classic" (whole line at once). Move them to
+    // the new single-word captions once; a deliberate later choice is kept.
+    const int captionVersion = settings.value(QStringLiteral("captionStyleVersion"), 1).toInt();
+    if (captionVersion < 2) {
+        if (captionStyle.isEmpty() || captionStyle == QLatin1String("Classic"))
+            captionStyle = QStringLiteral("Single Word");
+        settings.setValue(QStringLiteral("captionStyleVersion"), 2);
+        settings.setValue(QStringLiteral("captionStyle"), captionStyle);
+    }
+    if (!SettingsDialog::availableCaptionStyles().contains(captionStyle))
+        captionStyle = QStringLiteral("Single Word");
     startWithWindows = settings.value(QStringLiteral("startWithWindows"),
                                       startWithWindows).toBool();
     startWithWindows = windowsRunEntryPresent();

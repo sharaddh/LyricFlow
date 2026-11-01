@@ -4,12 +4,14 @@
 #include <QList>
 #include <QColor>
 #include <QBrush>
+#include <QFont>
 #include "LyricsClient.h"
 #include "MediaDetector.h"
 #include "MediaSession.h"
 #include "SettingsDialog.h"
 
 class QTextDocument;
+class QPainter;
 class QMouseEvent;
 class QWheelEvent;
 class QContextMenuEvent;
@@ -26,6 +28,7 @@ class OverlayWindow final : public QWidget
     Q_OBJECT
     Q_PROPERTY(qreal captionScale READ captionScale WRITE setCaptionScale)
     Q_PROPERTY(qreal textOpacity READ textOpacity WRITE setTextOpacity)
+    Q_PROPERTY(qreal wordProgress READ wordProgress WRITE setWordProgress)
 public:
     explicit OverlayWindow(QWidget *parent = nullptr);
 
@@ -34,6 +37,9 @@ public:
 
     qreal textOpacity() const { return m_textOpacity; }
     void setTextOpacity(qreal opacity);
+
+    qreal wordProgress() const { return m_wordProgress; }
+    void setWordProgress(qreal progress);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -75,14 +81,26 @@ private:
     bool wordByWord = true;
     QString upcomingWords = QStringLiteral("All words");
     bool emphasizeWord = false;
-    QString captionStyle = QStringLiteral("Classic");
+    QString captionStyle = QStringLiteral("Single Word");
     QString animationType = QStringLiteral("Fade");
     int lineSpacing = 45;
+    int lyricOffsetMs = 0;
     qreal m_captionScale = 1.0;
     int lastLineIndex = -1;
     int lastWordIndex = -1;
     QPropertyAnimation *fadeAnimation = nullptr;
     QVariantAnimation *scaleAnimation = nullptr;
+
+    // Single-word captions are painted by hand (not through the document) so the
+    // active word can slide, scale and cross-fade at 60 fps.
+    bool m_wordModeActive = false;
+    bool m_lyricsDirty = true;
+    QString m_activeWord;
+    QString m_previousWord;
+    int m_wordLineIndex = -1;
+    int m_wordIndex = -1;
+    qreal m_wordProgress = 1.0;
+    QPropertyAnimation *wordAnimation = nullptr;
 
     QList<LyricLine> syncedLines;
     QString plainLyrics;
@@ -146,8 +164,15 @@ private:
     void parseSyncedLyrics(const QString &synced);
     void updateSyncedLine();
     void renderSynced();
+    bool usesSingleWordCaptions() const;
     int effectiveFontSize() const;
     int measureContentHeight(int width) const;
+    int singleWordContentHeight() const;
+    int cardInset() const { return drawsCard ? 8 : 0; }
+    QFont captionFont(int pixelSize, bool bold) const;
+    void paintSingleWord(QPainter &painter);
+    void updateSingleWord(const LyricLine &line, int lineIndex, int wordIndex);
+    void restartWordAnimation(int durationMs);
     void applyTextFont();
     void setDocumentHtml(const QString &html);
     void animateCaption();
