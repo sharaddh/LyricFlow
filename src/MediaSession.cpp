@@ -1,5 +1,6 @@
 #include "MediaSession.h"
 
+#include <QDateTime>
 #include <QMetaObject>
 
 #include <atomic>
@@ -284,6 +285,21 @@ void MediaSession::start(int intervalMs)
                         && SUCCEEDED(timeline->get_EndTime(&end))) {
                         state.positionMs = (position.Duration - start.Duration) / 10000;
                         state.durationMs = (end.Duration - start.Duration) / 10000;
+
+                        // Players refresh the reported position roughly once a
+                        // second. LastUpdatedTime tells us how stale that sample
+                        // is; add the age back so captions do not trail the audio.
+                        INT64 lastUpdated = 0;
+                        if (state.isPlaying()
+                            && SUCCEEDED(timeline->get_LastUpdatedTime(&lastUpdated))
+                            && lastUpdated > 0) {
+                            const qint64 updatedUnixMs =
+                                lastUpdated / 10000 - 11644473600000LL;
+                            const qint64 ageMs =
+                                QDateTime::currentMSecsSinceEpoch() - updatedUnixMs;
+                            if (ageMs > 0 && ageMs < 1500)
+                                state.positionMs += ageMs;
+                        }
                     }
                     timeline->Release();
                 }
